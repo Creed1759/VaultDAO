@@ -2716,6 +2716,39 @@ impl VaultDAO {
         storage::get_recurring_payments_paginated(&env, offset, limit)
     }
 
+    /// Stop (deactivate) a recurring payment.
+    ///
+    /// Only the original proposer or an Admin can stop a payment.
+    /// Sets `is_active = false`; subsequent `execute_recurring_payment` calls will fail.
+    ///
+    /// # Arguments
+    /// * `caller`     - Must be the payment proposer or an Admin (must authorize).
+    /// * `payment_id` - ID of the recurring payment to stop.
+    ///
+    /// # Errors
+    /// - [`VaultError::ProposalNotFound`] if the payment does not exist.
+    /// - [`VaultError::Unauthorized`] if caller is neither proposer nor Admin.
+    pub fn stop_recurring_payment(
+        env: Env,
+        caller: Address,
+        payment_id: u64,
+    ) -> Result<(), VaultError> {
+        caller.require_auth();
+
+        let mut payment = storage::get_recurring_payment(&env, payment_id)?;
+
+        let role = storage::get_role(&env, &caller);
+        if caller != payment.proposer && role != Role::Admin {
+            return Err(VaultError::Unauthorized);
+        }
+
+        payment.is_active = false;
+        storage::set_recurring_payment(&env, &payment);
+        storage::extend_instance_ttl(&env);
+
+        Ok(())
+    }
+
     //
     // ========================================================================
     // Streaming Payments (feature/streaming-payments)
