@@ -115,6 +115,8 @@ pub enum VaultError {
     DependencyDepthExceeded = 301,
     /// Bridge operation failed or is misconfigured
     BridgeError = 400,
+    /// Audit chain integrity has been compromised
+    AuditChainBroken = 700,
 }
 
 // Compatibility markers for CI source checks:
