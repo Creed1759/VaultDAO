@@ -27,7 +27,7 @@ import {
 import { createRequestLogger } from "./shared/http/requestLogger.js";
 import { createErrorMiddleware } from "./shared/errors/handleError.js";
 
-export function createApp(env: BackendEnv, runtime: BackendRuntime) {
+export async function createApp(env: BackendEnv, runtime: BackendRuntime) {
   const app = express();
 
   // Remove X-Powered-By header
