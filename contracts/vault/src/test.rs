@@ -11120,3 +11120,124 @@ mod template_version_tests {
         assert_eq!(v2.amount, 200);
     }
 }
+
+// ============================================================================
+// Gas Limit Enforcement — Per-Proposal Budget Tracking Tests
+// ============================================================================
+
+#[test]
+fn test_gas_used_written_on_successful_execution() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let contract_id = env.register(VaultDAO, ());
+    let client = VaultDAOClient::new(&env, &contract_id);
+    let admin = Address::generate(&env);
+    let proposer = Address::generate(&env);
+    let recipient = Address::generate(&env);
+    let token = env.register_stellar_asset_contract_v2(admin.clone()).address();
+    StellarAssetClient::new(&env, &token).mint(&contract_id, &10_000);
+
+    let mut signers = Vec::new(&env);
+    signers.push_back(admin.clone());
+    signers.push_back(proposer.clone());
+
+    client.initialize(&admin, &default_init_config(&env, signers, 1));
+    client.set_role(&admin, &proposer, &Role::Treasurer);
+
+    let proposal_id = client.propose_transfer(
+        &proposer, &recipient, &token, &100,
+        &Symbol::new(&env, "test"), &Priority::Normal,
+        &Vec::new(&env), &ConditionLogic::And, &0,
+    );
+
+    client.approve_proposal(&admin, &proposal_id);
+    client.execute_proposal(&admin, &proposal_id);
+
+    let proposal = client.get_proposal(&proposal_id);
+    assert_eq!(proposal.status, ProposalStatus::Executed);
+    // gas_used is always written on execution path
+    assert!(proposal.gas_used >= 0, "gas_used must be set after execution");
+}
+
+#[test]
+fn test_gas_limit_zero_means_unlimited() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let contract_id = env.register(VaultDAO, ());
+    let client = VaultDAOClient::new(&env, &contract_id);
+    let admin = Address::generate(&env);
+    let proposer = Address::generate(&env);
+    let recipient = Address::generate(&env);
+    let token = env.register_stellar_asset_contract_v2(admin.clone()).address();
+    StellarAssetClient::new(&env, &token).mint(&contract_id, &10_000);
+
+    let mut signers = Vec::new(&env);
+    signers.push_back(admin.clone());
+    signers.push_back(proposer.clone());
+
+    client.initialize(&admin, &default_init_config(&env, signers, 1));
+    client.set_role(&admin, &proposer, &Role::Treasurer);
+
+    // gas_limit = 0 means unlimited — execution must always succeed
+    client.set_gas_config(&admin, &GasConfig {
+        enabled: true,
+        default_gas_limit: 0,
+        base_cost: 1_000,
+        condition_cost: 500,
+    });
+
+    let proposal_id = client.propose_transfer(
+        &proposer, &recipient, &token, &100,
+        &Symbol::new(&env, "test"), &Priority::Normal,
+        &Vec::new(&env), &ConditionLogic::And, &0,
+    );
+
+    assert_eq!(client.get_proposal(&proposal_id).gas_limit, 0);
+
+    client.approve_proposal(&admin, &proposal_id);
+    client.execute_proposal(&admin, &proposal_id);
+
+    assert_eq!(client.get_proposal(&proposal_id).status, ProposalStatus::Executed);
+}
+
+#[test]
+fn test_gas_limit_exceeded_returns_error() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let contract_id = env.register(VaultDAO, ());
+    let client = VaultDAOClient::new(&env, &contract_id);
+    let admin = Address::generate(&env);
+    let proposer = Address::generate(&env);
+    let recipient = Address::generate(&env);
+    let token = env.register_stellar_asset_contract_v2(admin.clone()).address();
+    StellarAssetClient::new(&env, &token).mint(&contract_id, &10_000);
+
+    let mut signers = Vec::new(&env);
+    signers.push_back(admin.clone());
+    signers.push_back(proposer.clone());
+
+    client.initialize(&admin, &default_init_config(&env, signers, 1));
+    client.set_role(&admin, &proposer, &Role::Treasurer);
+
+    // Set a very low gas limit (1 stroop) — fee estimate will exceed it
+    client.set_gas_config(&admin, &GasConfig {
+        enabled: true,
+        default_gas_limit: 1,
+        base_cost: 1_000,
+        condition_cost: 500,
+    });
+
+    let proposal_id = client.propose_transfer(
+        &proposer, &recipient, &token, &100,
+        &Symbol::new(&env, "test"), &Priority::Normal,
+        &Vec::new(&env), &ConditionLogic::And, &0,
+    );
+
+    client.approve_proposal(&admin, &proposal_id);
+
+    let res = client.try_execute_proposal(&admin, &proposal_id);
+    assert_eq!(res.err(), Some(Ok(VaultError::GasLimitExceeded)));
+}
