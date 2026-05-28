@@ -494,6 +494,8 @@ pub struct RecurringPayment {
     pub payment_count: u32,
     /// Configured status (Active/Stopped)
     pub is_active: bool,
+    /// Maximum missed payments to catch up (0 = unlimited)
+    pub max_missed_payments: u32,
 }
 
 // ============================================================================

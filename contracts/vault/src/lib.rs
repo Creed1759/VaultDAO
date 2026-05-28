@@ -2850,6 +2850,7 @@ impl VaultDAO {
         amount: i128,
         memo: Symbol,
         interval: u64,
+        max_missed_payments: u32,
     ) -> Result<u64, VaultError> {
         proposer.require_auth();
 
@@ -2884,6 +2885,7 @@ impl VaultDAO {
             next_payment_ledger: current_ledger + interval,
             payment_count: 0,
             is_active: true,
+            max_missed_payments,
         };
 
         storage::set_recurring_payment(&env, &payment);
@@ -2906,43 +2908,71 @@ impl VaultDAO {
             return Err(VaultError::TimelockNotExpired); // Reuse error for "Too Early"
         }
 
-        // Check spending limits (Daily & Weekly)
-        // Note: Recurring payments count towards limits!
+        // Calculate missed payments
+        let missed_payments = if current_ledger >= payment.next_payment_ledger {
+            (current_ledger - payment.next_payment_ledger) / payment.interval
+        } else {
+            0
+        };
+
+        // Check if missed payments exceed cap (if cap > 0)
+        if payment.max_missed_payments > 0 && missed_payments > payment.max_missed_payments as u64 {
+            return Err(VaultError::RecurringPaymentMissedCapExceeded);
+        }
+
+        // Cap missed payments at max_missed_payments if set
+        let capped_missed = if payment.max_missed_payments > 0 {
+            missed_payments.min(payment.max_missed_payments as u64)
+        } else {
+            missed_payments
+        };
+
+        let total_payments = capped_missed + 1; // missed + current payment
+        let total_amount = payment.amount * total_payments as i128;
+
+        // Check spending limits for total amount
         let config = storage::get_config(&env)?;
 
         let today = storage::get_day_number(&env);
         let spent_today = storage::get_daily_spent(&env, today);
-        if spent_today + payment.amount > config.daily_limit {
+        if spent_today + total_amount > config.daily_limit {
             return Err(VaultError::ExceedsDailyLimit);
         }
 
         let week = storage::get_week_number(&env);
         let spent_week = storage::get_weekly_spent(&env, week);
-        if spent_week + payment.amount > config.weekly_limit {
+        if spent_week + total_amount > config.weekly_limit {
             return Err(VaultError::ExceedsWeeklyLimit);
         }
 
         // Check balance
         let balance = token::balance(&env, &payment.token);
-        if balance < payment.amount {
+        if balance < total_amount {
             return Err(VaultError::InsufficientBalance);
         }
 
         // Revalidate recipient against current whitelist/blacklist policies.
-        // Policies may have changed since scheduling; block execution if the
-        // recipient is no longer permitted.
         Self::validate_recipient(&env, &payment.recipient)?;
 
-        // Execute
-        token::transfer(&env, &payment.token, &payment.recipient, payment.amount);
+        // Execute all payments
+        for i in 0..total_payments {
+            token::transfer(&env, &payment.token, &payment.recipient, payment.amount);
+            
+            // Emit event for each payment with sequential ledger timestamp
+            let payment_ledger = payment.next_payment_ledger + (i * payment.interval);
+            env.events().publish(
+                (Symbol::new(&env, "recurring_payment_executed"),),
+                (payment_id, payment_ledger, payment.amount),
+            );
+        }
 
-        // Update limits
-        storage::add_daily_spent(&env, today, payment.amount);
-        storage::add_weekly_spent(&env, week, payment.amount);
+        // Update limits with total amount
+        storage::add_daily_spent(&env, today, total_amount);
+        storage::add_weekly_spent(&env, week, total_amount);
 
         // Update payment schedule
-        payment.next_payment_ledger += payment.interval;
-        payment.payment_count += 1;
+        payment.next_payment_ledger += total_payments * payment.interval;
+        payment.payment_count += total_payments as u32;
         storage::set_recurring_payment(&env, &payment);
         storage::extend_instance_ttl(&env);
 

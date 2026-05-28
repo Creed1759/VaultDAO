@@ -78,6 +78,8 @@ pub enum VaultError {
     ConditionsNotMet = 140,
     /// Recurring payment interval is too short
     IntervalTooShort = 150,
+    /// Recurring payment missed execution cap exceeded
+    RecurringPaymentMissedCapExceeded = 800,
     /// DEX operation failed
     DexError = 160,
     /// Retry operation failed

@@ -86,6 +86,7 @@ fn test_schedule_payment_interval_too_short() {
         &100i128,
         &Symbol::new(&env, "payroll"),
         &719u64, // one below minimum
+        &0u32,   // max_missed_payments
     );
 
     assert_eq!(
@@ -113,6 +114,7 @@ fn test_schedule_payment_valid_interval_sets_next_ledger() {
         &100i128,
         &Symbol::new(&env, "payroll"),
         &interval,
+        &0u32, // max_missed_payments
     );
 
     let payment = client.get_recurring_payment(&payment_id);
@@ -139,6 +141,7 @@ fn test_execute_recurring_payment_too_early_fails() {
         &100i128,
         &Symbol::new(&env, "payroll"),
         &1000u64,
+        &0u32, // max_missed_payments
     );
 
     // Ledger is still at creation time — payment is not due yet
@@ -168,6 +171,7 @@ fn test_execute_recurring_payment_at_due_ledger_succeeds() {
         &amount,
         &Symbol::new(&env, "payroll"),
         &interval,
+        &0u32, // max_missed_payments
     );
 
     let payment = client.get_recurring_payment(&payment_id);
@@ -203,6 +207,7 @@ fn test_execute_recurring_payment_twice_in_same_window_fails() {
         &100i128,
         &Symbol::new(&env, "payroll"),
         &interval,
+        &0u32, // max_missed_payments
     );
 
     let payment = client.get_recurring_payment(&payment_id);
@@ -239,6 +244,7 @@ fn test_stop_recurring_payment_sets_inactive() {
         &100i128,
         &Symbol::new(&env, "payroll"),
         &720u64,
+        &0u32, // max_missed_payments
     );
 
     assert!(client.get_recurring_payment(&payment_id).is_active);
@@ -266,6 +272,7 @@ fn test_execute_stopped_recurring_payment_fails() {
         &100i128,
         &Symbol::new(&env, "payroll"),
         &interval,
+        &0u32, // max_missed_payments
     );
 
     client.stop_recurring_payment(&admin, &payment_id);
@@ -316,6 +323,7 @@ fn test_execute_recurring_payment_transfers_tokens() {
         &amount,
         &Symbol::new(&env, "payroll"),
         &interval,
+        &0u32, // max_missed_payments
     );
 
     let payment = client.get_recurring_payment(&payment_id);
@@ -335,5 +343,115 @@ fn test_execute_recurring_payment_transfers_tokens() {
     assert_eq!(
         updated.next_payment_ledger,
         payment.next_payment_ledger + interval
+    );
+}
+
+// ============================================================================
+// New tests for catch-up logic
+// ============================================================================
+
+#[test]
+fn test_execute_recurring_payment_no_missed_payments() {
+    let env = Env::default();
+    let (client, admin, token, recipient) = setup(&env);
+
+    let interval = 1000u64;
+    let amount = 100i128;
+
+    let payment_id = client.schedule_payment(
+        &admin,
+        &recipient,
+        &token,
+        &amount,
+        &Symbol::new(&env, "payroll"),
+        &interval,
+        &3u32, // max_missed_payments
+    );
+
+    let payment = client.get_recurring_payment(&payment_id);
+    let due_ledger = payment.next_payment_ledger;
+
+    // Execute exactly on time - no missed payments
+    env.ledger().with_mut(|li| {
+        li.sequence_number = due_ledger as u32;
+    });
+
+    client.execute_recurring_payment(&payment_id);
+
+    let updated = client.get_recurring_payment(&payment_id);
+    assert_eq!(updated.payment_count, 1);
+    assert_eq!(updated.next_payment_ledger, due_ledger + interval);
+}
+
+#[test]
+fn test_execute_recurring_payment_three_missed_within_cap() {
+    let env = Env::default();
+    let (client, admin, token, recipient) = setup(&env);
+
+    let interval = 1000u64;
+    let amount = 100i128;
+
+    let payment_id = client.schedule_payment(
+        &admin,
+        &recipient,
+        &token,
+        &amount,
+        &Symbol::new(&env, "payroll"),
+        &interval,
+        &5u32, // max_missed_payments - allow up to 5 missed
+    );
+
+    let payment = client.get_recurring_payment(&payment_id);
+    let due_ledger = payment.next_payment_ledger;
+
+    // Advance 3 intervals past due (3 missed + 1 current = 4 total payments)
+    env.ledger().with_mut(|li| {
+        li.sequence_number = (due_ledger + 3 * interval) as u32;
+    });
+
+    let token_client = soroban_sdk::token::Client::new(&env, &token);
+    let balance_before = token_client.balance(&recipient);
+
+    client.execute_recurring_payment(&payment_id);
+
+    let balance_after = token_client.balance(&recipient);
+    let updated = client.get_recurring_payment(&payment_id);
+
+    // Should execute 4 payments (3 missed + 1 current)
+    assert_eq!(balance_after - balance_before, amount * 4);
+    assert_eq!(updated.payment_count, 4);
+    assert_eq!(updated.next_payment_ledger, due_ledger + 4 * interval);
+}
+
+#[test]
+fn test_execute_recurring_payment_three_missed_exceeding_cap() {
+    let env = Env::default();
+    let (client, admin, token, recipient) = setup(&env);
+
+    let interval = 1000u64;
+    let amount = 100i128;
+
+    let payment_id = client.schedule_payment(
+        &admin,
+        &recipient,
+        &token,
+        &amount,
+        &Symbol::new(&env, "payroll"),
+        &interval,
+        &2u32, // max_missed_payments - only allow 2 missed
+    );
+
+    let payment = client.get_recurring_payment(&payment_id);
+    let due_ledger = payment.next_payment_ledger;
+
+    // Advance 3 intervals past due (3 missed > 2 cap)
+    env.ledger().with_mut(|li| {
+        li.sequence_number = (due_ledger + 3 * interval) as u32;
+    });
+
+    let result = client.try_execute_recurring_payment(&payment_id);
+    assert_eq!(
+        result.err(),
+        Some(Ok(VaultError::RecurringPaymentMissedCapExceeded))
     );
 }
