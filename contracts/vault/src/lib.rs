@@ -2617,7 +2617,7 @@ impl VaultDAO {
 
         let role = storage::get_role(&env, &admin);
         if role != Role::Admin {
-            return Err(VaultError::Unauthorized);
+            return Err(VaultError::InsufficientRole);
         }
 
         let mut proposal = storage::get_proposal(&env, proposal_id)?;
@@ -2626,9 +2626,23 @@ impl VaultDAO {
             return Err(VaultError::ProposalNotPending);
         }
 
+        // new_deadline must be strictly after the current deadline
+        // and must not exceed the proposal's expiry
+        if new_deadline <= proposal.voting_deadline || new_deadline > proposal.expires_at {
+            return Err(VaultError::InvalidDeadline);
+        }
+
+        // Cap total extensions at 3 per proposal
+        const MAX_DEADLINE_EXTENSIONS: u32 = 3;
+        let extension_count = storage::get_deadline_extension_count(&env, proposal_id);
+        if extension_count >= MAX_DEADLINE_EXTENSIONS {
+            return Err(VaultError::MaxDeadlineExtensionsReached);
+        }
+
         let old_deadline = proposal.voting_deadline;
         proposal.voting_deadline = new_deadline;
         storage::set_proposal(&env, &proposal);
+        storage::increment_deadline_extension_count(&env, proposal_id);
         storage::extend_instance_ttl(&env);
 
         events::emit_voting_deadline_extended(
@@ -4907,7 +4921,7 @@ impl VaultDAO {
 
     /// Set or update a metadata key for a proposal.
     ///
-    /// Only Admin or the original proposer can update metadata.
+    /// Only Admin or the original proposer can update metadata on a Pending proposal.
     pub fn set_proposal_metadata(
         env: Env,
         caller: Address,
@@ -4922,6 +4936,16 @@ impl VaultDAO {
         let role = storage::get_role(&env, &caller);
         if role != Role::Admin && caller != proposal.proposer {
             return Err(VaultError::Unauthorized);
+        }
+
+        // Only allow metadata changes on Pending proposals
+        if proposal.status != ProposalStatus::Pending {
+            return Err(VaultError::ProposalNotPending);
+        }
+
+        // Validate key: must be non-empty
+        if key == Symbol::new(&env, "") {
+            return Err(VaultError::MetadataValueInvalid);
         }
 
         // Metadata validation: non-empty bounded value and bounded entry count.
@@ -4944,7 +4968,7 @@ impl VaultDAO {
 
     /// Remove a metadata key from a proposal.
     ///
-    /// Only Admin or the original proposer can remove metadata.
+    /// Only Admin or the original proposer can remove metadata on a Pending proposal.
     pub fn remove_proposal_metadata(
         env: Env,
         caller: Address,
@@ -4958,6 +4982,11 @@ impl VaultDAO {
         let role = storage::get_role(&env, &caller);
         if role != Role::Admin && caller != proposal.proposer {
             return Err(VaultError::Unauthorized);
+        }
+
+        // Only allow metadata changes on Pending proposals
+        if proposal.status != ProposalStatus::Pending {
+            return Err(VaultError::ProposalNotPending);
         }
 
         proposal.metadata.remove(key);
@@ -4984,6 +5013,48 @@ impl VaultDAO {
     ) -> Result<Map<Symbol, String>, VaultError> {
         let proposal = storage::get_proposal(&env, proposal_id)?;
         Ok(proposal.metadata)
+    }
+
+    /// Search proposals by a metadata key-value pair.
+    ///
+    /// Scans all proposals and returns IDs where `proposal.metadata[key] == value`.
+    /// Results are paginated via `offset` and `limit` (capped at 50).
+    ///
+    /// # Arguments
+    /// * `key`    - Metadata key to match
+    /// * `value`  - Metadata value to match
+    /// * `offset` - Number of matching proposals to skip
+    /// * `limit`  - Maximum number of IDs to return (capped at 50)
+    pub fn get_proposals_by_metadata(
+        env: Env,
+        key: Symbol,
+        value: String,
+        offset: u64,
+        limit: u64,
+    ) -> Vec<u64> {
+        let cap: u64 = if limit > 50 { 50 } else { limit };
+        let next_id = storage::get_next_proposal_id(&env);
+        let mut results: Vec<u64> = Vec::new(&env);
+        let mut skipped: u64 = 0;
+
+        for id in 1..next_id {
+            if results.len() as u64 >= cap {
+                break;
+            }
+            if let Ok(proposal) = storage::get_proposal(&env, id) {
+                if let Some(v) = proposal.metadata.get(key.clone()) {
+                    if v == value {
+                        if skipped < offset {
+                            skipped += 1;
+                        } else {
+                            results.push_back(id);
+                        }
+                    }
+                }
+            }
+        }
+
+        results
     }
 
     // ========================================================================
@@ -7065,16 +7136,20 @@ impl VaultDAO {
             Self::evaluate_conditions(env, proposal)?;
         }
 
-        // Gas limit check
+        // Compute the execution fee estimate (base_cost + condition_cost * operations)
         let fee_estimate = Self::calculate_execution_fee(env, proposal);
+
+        // Enforce gas limit before executing the transfer: 0 means unlimited
         if proposal.gas_limit > 0 && fee_estimate.total_fee > proposal.gas_limit {
+            // Always record gas_used even when the limit is exceeded
+            proposal.gas_used = fee_estimate.total_fee;
             events::emit_gas_limit_exceeded(
                 env,
                 proposal.id,
                 fee_estimate.total_fee,
                 proposal.gas_limit,
             );
-            return Err(VaultError::ExceedsProposalLimit);
+            return Err(VaultError::GasLimitExceeded);
         }
 
         // Calculate fee for this transaction
@@ -7141,7 +7216,7 @@ impl VaultDAO {
             }
         }
 
-        // Record gas used
+        // Always record gas_used after execution (even on success)
         proposal.gas_used = fee_estimate.total_fee;
 
         Ok(())
