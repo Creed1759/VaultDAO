@@ -209,6 +209,7 @@ impl VaultDAO {
             post_execution_hooks: config.post_execution_hooks,
             default_voting_deadline: config.default_voting_deadline,
             veto_addresses: config.veto_addresses,
+            veto_window_ledgers: config.veto_window_ledgers,
             retry_config: config.retry_config,
             recovery_config: config.recovery_config.clone(),
             staking_config: config.staking_config,
@@ -1718,7 +1719,21 @@ impl VaultDAO {
             return Err(VaultError::Unauthorized);
         }
 
+        let config = storage::get_config(&env)?;
         let mut proposal = storage::get_proposal(&env, proposal_id)?;
+
+        // Check veto window - veto_window_ledgers of 0 means veto is disabled entirely
+        if config.veto_window_ledgers == 0 {
+            return Err(VaultError::VetoWindowClosed);
+        }
+
+        let current_ledger = env.ledger().sequence() as u64;
+        let veto_deadline = proposal.created_at + config.veto_window_ledgers;
+        
+        // Veto only succeeds within proposal.created_at + veto_window_ledgers
+        if current_ledger > veto_deadline {
+            return Err(VaultError::VetoWindowClosed);
+        }
 
         if proposal.status == ProposalStatus::Executed {
             return Err(VaultError::ProposalAlreadyExecuted);
@@ -1778,6 +1793,8 @@ impl VaultDAO {
             }
         }
 
+        // Calculate remaining window for event
+        let remaining_window = veto_deadline.saturating_sub(current_ledger);
         events::emit_proposal_vetoed(&env, proposal_id, &vetoer);
 
         Ok(())
@@ -1802,6 +1819,11 @@ impl VaultDAO {
 
         if config.veto_addresses.contains(&addr) {
             return Err(VaultError::AddressAlreadyOnList);
+        }
+
+        // Cap veto_addresses list at 10 entries
+        if config.veto_addresses.len() >= 10 {
+            return Err(VaultError::BatchTooLarge); // Reusing existing error for list size limit
         }
 
         config.veto_addresses.push_back(addr.clone());
