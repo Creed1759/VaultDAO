@@ -222,6 +222,10 @@ pub enum FeatureKey {
     CrossChainProposal(u64),
     /// Re-entrancy guard for bridge execution (proposal_id) -> bool
     BridgeLock(u64),
+    /// Time-bucketed metrics snapshot keyed by week number -> VaultMetrics
+    MetricsBucket(u64),
+    /// Ordered list of stored bucket week numbers (for pruning) -> Vec<u64>
+    MetricsBucketIndex,
 }
 
 /// TTL constants (in ledgers, ~5 seconds each)
@@ -1296,6 +1300,7 @@ pub fn metrics_on_execution(env: &Env, gas_used: u64, execution_time_ledgers: u6
         .saturating_add(execution_time_ledgers);
     metrics.last_updated_ledger = env.ledger().sequence() as u64;
     set_metrics(env, &metrics);
+    update_metrics_bucket(env, &metrics);
 }
 
 pub fn metrics_on_rejection(env: &Env) {
@@ -1303,6 +1308,7 @@ pub fn metrics_on_rejection(env: &Env) {
     metrics.rejected_count = metrics.rejected_count.saturating_add(1);
     metrics.last_updated_ledger = env.ledger().sequence() as u64;
     set_metrics(env, &metrics);
+    update_metrics_bucket(env, &metrics);
 }
 
 pub fn metrics_on_expiry(env: &Env) {
@@ -1317,6 +1323,7 @@ pub fn metrics_on_proposal(env: &Env) {
     metrics.total_proposals = metrics.total_proposals.saturating_add(1);
     metrics.last_updated_ledger = env.ledger().sequence() as u64;
     set_metrics(env, &metrics);
+    update_metrics_bucket(env, &metrics);
 }
 
 pub fn get_staking_config(env: &Env) -> StakingConfig {
@@ -2204,4 +2211,89 @@ pub fn release_bridge_lock(env: &Env, proposal_id: u64) {
     env.storage()
         .temporary()
         .remove(&FeatureKey::BridgeLock(proposal_id));
+}
+
+// ============================================================================
+// Metrics Bucket Storage (Issue: feature/performance-metrics time-bucketed)
+// ============================================================================
+
+const MAX_METRIC_BUCKETS: u32 = 52;
+const BUCKET_TTL: u32 = DAY_IN_LEDGERS * 365;
+
+fn get_metrics_bucket_index(env: &Env) -> Vec<u64> {
+    env.storage()
+        .persistent()
+        .get(&FeatureKey::MetricsBucketIndex)
+        .unwrap_or_else(|| Vec::new(env))
+}
+
+fn set_metrics_bucket_index(env: &Env, index: &Vec<u64>) {
+    let key = FeatureKey::MetricsBucketIndex;
+    env.storage().persistent().set(&key, index);
+    env.storage()
+        .persistent()
+        .extend_ttl(&key, BUCKET_TTL / 2, BUCKET_TTL);
+}
+
+pub fn get_metrics_bucket(env: &Env, week: u64) -> VaultMetrics {
+    env.storage()
+        .persistent()
+        .get(&FeatureKey::MetricsBucket(week))
+        .unwrap_or_else(VaultMetrics::default)
+}
+
+pub fn set_metrics_bucket(env: &Env, week: u64, metrics: &VaultMetrics) {
+    let key = FeatureKey::MetricsBucket(week);
+    env.storage().persistent().set(&key, metrics);
+    env.storage()
+        .persistent()
+        .extend_ttl(&key, BUCKET_TTL / 2, BUCKET_TTL);
+
+    // Update index and prune if over cap
+    let mut index = get_metrics_bucket_index(env);
+    if !index.contains(week) {
+        index.push_back(week);
+        // Prune oldest bucket if over cap
+        if index.len() > MAX_METRIC_BUCKETS {
+            let oldest = index.get(0).unwrap();
+            env.storage()
+                .persistent()
+                .remove(&FeatureKey::MetricsBucket(oldest));
+            index.remove(0);
+        }
+        set_metrics_bucket_index(env, &index);
+    }
+}
+
+/// Update the current week's metrics bucket with the latest cumulative snapshot.
+pub fn update_metrics_bucket(env: &Env, metrics: &VaultMetrics) {
+    let week = get_week_number(env);
+    set_metrics_bucket(env, week, metrics);
+    crate::events::emit_metrics_bucket_updated(
+        env,
+        week,
+        metrics.executed_count,
+        metrics.rejected_count,
+        metrics.expired_count,
+    );
+}
+
+/// Aggregate metrics buckets across a week range (inclusive).
+pub fn get_metrics_for_period(env: &Env, from_week: u64, to_week: u64) -> VaultMetrics {
+    let mut agg = VaultMetrics::default();
+    for week in from_week..=to_week {
+        let bucket = get_metrics_bucket(env, week);
+        agg.total_proposals = agg.total_proposals.saturating_add(bucket.total_proposals);
+        agg.executed_count = agg.executed_count.saturating_add(bucket.executed_count);
+        agg.rejected_count = agg.rejected_count.saturating_add(bucket.rejected_count);
+        agg.expired_count = agg.expired_count.saturating_add(bucket.expired_count);
+        agg.total_execution_time_ledgers = agg
+            .total_execution_time_ledgers
+            .saturating_add(bucket.total_execution_time_ledgers);
+        agg.total_gas_used = agg.total_gas_used.saturating_add(bucket.total_gas_used);
+        if bucket.last_updated_ledger > agg.last_updated_ledger {
+            agg.last_updated_ledger = bucket.last_updated_ledger;
+        }
+    }
+    agg
 }

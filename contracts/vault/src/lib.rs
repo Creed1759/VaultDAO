@@ -2633,6 +2633,159 @@ impl VaultDAO {
         storage::get_insurance_pool(&env, &token_addr)
     }
 
+    /// Get the insurance pool balance for a specific token (alias for get_insurance_pool).
+    pub fn get_insurance_pool_balance(env: Env, token_addr: Address) -> i128 {
+        storage::get_insurance_pool(&env, &token_addr)
+    }
+
+    /// Propose a governed withdrawal from the insurance pool.
+    /// Creates a standard proposal with memo = "ins_withdraw".
+    /// Requires super-majority: min(config.threshold + 1, config.signers.len()) approvals.
+    pub fn propose_insurance_withdrawal(
+        env: Env,
+        proposer: Address,
+        token: Address,
+        amount: i128,
+        recipient: Address,
+    ) -> Result<u64, VaultError> {
+        proposer.require_auth();
+
+        let config = storage::get_config(&env)?;
+        let role = storage::get_role(&env, &proposer);
+        if role != Role::Treasurer && role != Role::Admin {
+            return Err(VaultError::InsufficientRole);
+        }
+
+        if amount <= 0 {
+            return Err(VaultError::InvalidAmount);
+        }
+
+        let pool_balance = storage::get_insurance_pool(&env, &token);
+        if amount > pool_balance {
+            return Err(VaultError::InsurancePoolInsufficient);
+        }
+
+        // Validate recipient
+        Self::validate_recipient(&env, &recipient)?;
+
+        let current_ledger = env.ledger().sequence() as u64;
+        let proposal_id = storage::increment_proposal_id(&env);
+
+        let proposal = Proposal {
+            id: proposal_id,
+            proposer: proposer.clone(),
+            recipient: recipient.clone(),
+            token: token.clone(),
+            amount,
+            memo: Symbol::new(&env, "ins_withdraw"),
+            metadata: Map::new(&env),
+            tags: Vec::new(&env),
+            approvals: Vec::new(&env),
+            abstentions: Vec::new(&env),
+            attachments: Vec::new(&env),
+            status: ProposalStatus::Pending,
+            priority: Priority::Normal,
+            conditions: Vec::new(&env),
+            condition_logic: ConditionLogic::And,
+            created_at: current_ledger,
+            expires_at: current_ledger + PROPOSAL_EXPIRY_LEDGERS,
+            unlock_ledger: 0,
+            execution_time: None,
+            insurance_amount: 0,
+            stake_amount: 0,
+            gas_limit: 0,
+            gas_used: 0,
+            snapshot_ledger: current_ledger,
+            snapshot_signers: config.signers.clone(),
+            depends_on: Vec::new(&env),
+            is_swap: false,
+            voting_deadline: if config.default_voting_deadline > 0 {
+                current_ledger + config.default_voting_deadline
+            } else {
+                0
+            },
+        };
+
+        storage::set_proposal(&env, &proposal);
+        storage::add_to_priority_queue(&env, Priority::Normal as u32, proposal_id);
+        storage::extend_instance_ttl(&env);
+        storage::metrics_on_proposal(&env);
+
+        events::emit_proposal_created(
+            &env,
+            proposal_id,
+            &proposer,
+            &recipient,
+            &token,
+            amount,
+            0,
+        );
+
+        Ok(proposal_id)
+    }
+
+    /// Execute an approved insurance withdrawal proposal.
+    /// Transfers from the insurance pool to the proposal recipient.
+    /// Requires super-majority: min(config.threshold + 1, config.signers.len()) approvals.
+    pub fn execute_insurance_withdrawal(
+        env: Env,
+        executor: Address,
+        proposal_id: u64,
+    ) -> Result<(), VaultError> {
+        executor.require_auth();
+
+        let mut proposal = storage::get_proposal(&env, proposal_id)?;
+
+        // Must be an insurance withdrawal proposal
+        if proposal.memo != Symbol::new(&env, "ins_withdraw") {
+            return Err(VaultError::Unauthorized);
+        }
+
+        if proposal.status != ProposalStatus::Approved {
+            return Err(VaultError::ProposalNotApproved);
+        }
+
+        let config = storage::get_config(&env)?;
+
+        // Super-majority check: min(threshold + 1, signers.len())
+        let super_majority = core::cmp::min(
+            config.threshold.saturating_add(1),
+            config.signers.len(),
+        );
+        if proposal.approvals.len() < super_majority {
+            return Err(VaultError::ProposalNotApproved);
+        }
+
+        let pool_balance = storage::get_insurance_pool(&env, &proposal.token);
+        if proposal.amount > pool_balance {
+            return Err(VaultError::InsurancePoolInsufficient);
+        }
+
+        // Atomically deduct from pool and transfer
+        storage::subtract_from_insurance_pool(&env, &proposal.token, proposal.amount);
+        token::transfer(&env, &proposal.token, &proposal.recipient, proposal.amount);
+
+        proposal.status = ProposalStatus::Executed;
+        storage::set_proposal(&env, &proposal);
+        storage::extend_instance_ttl(&env);
+
+        let current_ledger = env.ledger().sequence() as u64;
+        let execution_time = current_ledger.saturating_sub(proposal.created_at);
+        storage::metrics_on_execution(&env, 0, execution_time);
+
+        events::emit_proposal_executed(
+            &env,
+            proposal_id,
+            &executor,
+            &proposal.recipient,
+            &proposal.token,
+            proposal.amount,
+            current_ledger,
+        );
+
+        Ok(())
+    }
+
     /// Get the current vault configuration.
     ///
     /// Returns the full [`Config`] struct so that frontends and SDKs can read
@@ -3630,6 +3783,82 @@ impl VaultDAO {
         storage::get_comment(&env, comment_id)
     }
 
+    /// Soft-delete a comment. Caller must be the author or an Admin.
+    /// Sets text to "deleted" and preserves id/parent_id for thread integrity.
+    pub fn delete_comment(
+        env: Env,
+        caller: Address,
+        comment_id: u64,
+    ) -> Result<(), VaultError> {
+        caller.require_auth();
+
+        let mut comment = storage::get_comment(&env, comment_id)?;
+
+        let role = storage::get_role(&env, &caller);
+        if comment.author != caller && role != Role::Admin {
+            return Err(VaultError::Unauthorized);
+        }
+
+        comment.text = Symbol::new(&env, "deleted");
+        storage::set_comment(&env, &comment);
+        storage::extend_instance_ttl(&env);
+
+        events::emit_comment_deleted(&env, comment_id, &caller);
+
+        Ok(())
+    }
+
+    /// Get threaded comments for a proposal under a given parent (0 = top-level).
+    /// Returns comments in creation order. Capped at `limit` (max 50).
+    /// Returns VaultError::ThreadDepthExceeded if parent_id is at depth >= 5.
+    pub fn get_comment_thread(
+        env: Env,
+        proposal_id: u64,
+        parent_id: u64,
+        offset: u32,
+        limit: u32,
+    ) -> Result<Vec<Comment>, VaultError> {
+        // Enforce max thread depth: walk up from parent_id counting levels
+        if parent_id > 0 {
+            let mut depth: u32 = 0;
+            let mut current_id = parent_id;
+            loop {
+                let c = storage::get_comment(&env, current_id)?;
+                if c.parent_id == 0 {
+                    break;
+                }
+                depth += 1;
+                if depth >= 5 {
+                    return Err(VaultError::ThreadDepthExceeded);
+                }
+                current_id = c.parent_id;
+            }
+        }
+
+        let cap: u32 = if limit > 50 { 50 } else { limit };
+        let comment_ids = storage::get_proposal_comments(&env, proposal_id);
+        let mut result: Vec<Comment> = Vec::new(&env);
+        let mut skipped: u32 = 0;
+
+        for i in 0..comment_ids.len() {
+            if result.len() >= cap {
+                break;
+            }
+            if let Some(cid) = comment_ids.get(i) {
+                if let Ok(comment) = storage::get_comment(&env, cid) {
+                    if comment.parent_id == parent_id {
+                        if skipped < offset {
+                            skipped += 1;
+                            continue;
+                        }
+                        result.push_back(comment);
+                    }
+                }
+            }
+        }
+
+        Ok(result)
+    }
     // ========================================================================
     // Audit Trail
     // ========================================================================
@@ -4472,6 +4701,45 @@ impl VaultDAO {
         storage::get_notification_prefs(&env, &addr)
     }
 
+    /// Get addresses subscribed to a specific notification event type.
+    /// Scans the role index and returns up to 100 addresses that have the given
+    /// notification type enabled. `event_type` must be one of:
+    /// "proposal", "approval", "execution", "rejection", "expiry".
+    pub fn get_addresses_subscribed_to(
+        env: Env,
+        event_type: Symbol,
+    ) -> Vec<Address> {
+        let index = storage::get_role_index(&env);
+        let mut result: Vec<Address> = Vec::new(&env);
+        let cap: u32 = 100;
+
+        for i in 0..index.len() {
+            if result.len() >= cap {
+                break;
+            }
+            if let Some(addr) = index.get(i) {
+                let prefs = storage::get_notification_prefs(&env, &addr);
+                let subscribed = if event_type == Symbol::new(&env, "proposal") {
+                    prefs.notify_on_proposal
+                } else if event_type == Symbol::new(&env, "approval") {
+                    prefs.notify_on_approval
+                } else if event_type == Symbol::new(&env, "execution") {
+                    prefs.notify_on_execution
+                } else if event_type == Symbol::new(&env, "rejection") {
+                    prefs.notify_on_rejection
+                } else if event_type == Symbol::new(&env, "expiry") {
+                    prefs.notify_on_expiry
+                } else {
+                    false
+                };
+                if subscribed {
+                    result.push_back(addr);
+                }
+            }
+        }
+        result
+    }
+
     // ========================================================================
     // Gas Limit Configuration (Issue: feature/gas-limits)
     // ========================================================================
@@ -4553,6 +4821,13 @@ impl VaultDAO {
     /// ```
     pub fn get_metrics(env: Env) -> VaultMetrics {
         storage::get_metrics(&env)
+    }
+
+    /// Get aggregated metrics for a range of weeks (inclusive).
+    /// Week numbers use the same formula as spending limits: timestamp / 604800.
+    /// Returns cumulative totals across all stored buckets in the range.
+    pub fn get_metrics_for_period(env: Env, from_week: u64, to_week: u64) -> VaultMetrics {
+        storage::get_metrics_for_period(&env, from_week, to_week)
     }
 
     // ========================================================================

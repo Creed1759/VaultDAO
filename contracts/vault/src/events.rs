@@ -1166,3 +1166,25 @@ pub fn emit_reputation_config_updated(env: &Env, admin: &Address) {
     env.events()
         .publish((Symbol::new(env, "rep_config_updated"),), admin.clone());
 }
+
+/// Emit when a comment is deleted (soft delete)
+pub fn emit_comment_deleted(env: &Env, comment_id: u64, caller: &Address) {
+    env.events().publish(
+        (Symbol::new(env, "comment_deleted"), comment_id),
+        caller.clone(),
+    );
+}
+
+/// Emit when metrics bucket is updated with current week stats
+pub fn emit_metrics_bucket_updated(
+    env: &Env,
+    week: u64,
+    executed: u64,
+    rejected: u64,
+    expired: u64,
+) {
+    env.events().publish(
+        (Symbol::new(env, "metrics_bucket_upd"), week),
+        (executed, rejected, expired),
+    );
+}
