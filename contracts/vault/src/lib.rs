@@ -3608,14 +3608,18 @@ impl VaultDAO {
     }
 
     /// Verify audit trail integrity across an inclusive range of entry IDs.
-    pub fn verify_audit_chain(env: Env, from_id: u64, to_id: u64) -> bool {
+    /// Verify audit chain integrity from from_id to to_id (inclusive)
+    /// 
+    /// This is a read-only function callable by anyone to verify chain integrity.
+    /// Returns VaultError::AuditChainBroken if any hash mismatch is found.
+    pub fn verify_audit_chain(env: Env, from_id: u64, to_id: u64) -> Result<(), VaultError> {
         if from_id == 0 || from_id > to_id {
-            return false;
+            return Err(VaultError::AuditChainBroken);
         }
 
         let last_audit_id = storage::get_next_audit_id(&env).saturating_sub(1);
         if to_id > last_audit_id {
-            return false;
+            return Err(VaultError::AuditChainBroken);
         }
 
         let mut expected_prev_hash = if from_id == 1 {
@@ -3623,22 +3627,23 @@ impl VaultDAO {
         } else if let Ok(prev_entry) = storage::get_audit_entry(&env, from_id - 1) {
             prev_entry.hash
         } else {
-            return false;
+            return Err(VaultError::AuditChainBroken);
         };
 
         for id in from_id..=to_id {
             let entry = if let Ok(entry) = storage::get_audit_entry(&env, id) {
                 entry
             } else {
-                return false;
+                return Err(VaultError::AuditChainBroken);
             };
 
             if entry.prev_hash != expected_prev_hash {
-                return false;
+                return Err(VaultError::AuditChainBroken);
             }
 
             let computed_hash = storage::compute_audit_hash(
                 &env,
+                entry.id,
                 &entry.action,
                 &entry.actor,
                 entry.target,
@@ -3646,13 +3651,13 @@ impl VaultDAO {
                 entry.prev_hash,
             );
             if computed_hash != entry.hash {
-                return false;
+                return Err(VaultError::AuditChainBroken);
             }
 
             expected_prev_hash = entry.hash;
         }
 
-        true
+        Ok(())
     }
 
     /// Verify audit trail integrity
@@ -3681,6 +3686,7 @@ impl VaultDAO {
             let entry = storage::get_audit_entry(&env, id)?;
             let computed = storage::compute_audit_hash(
                 &env,
+                entry.id,
                 &entry.action,
                 &entry.actor,
                 entry.target,
