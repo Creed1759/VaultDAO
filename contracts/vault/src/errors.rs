@@ -108,6 +108,10 @@ pub enum VaultError {
     RecurringPaymentStopped = 1001,
     /// A config change proposal is already pending
     ConfigChangeInProgress = 1010,
+    /// Pre-execution hook failed
+    HookFailed = 810,
+    /// Post-execution hook failed  
+    PostHookFailed = 811,
 }
 
 // Additional error types that exceed contracterror limits - use generic errors above
