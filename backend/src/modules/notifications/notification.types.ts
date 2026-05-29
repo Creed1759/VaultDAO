@@ -3,6 +3,7 @@ export interface NotificationEvent<TPayload = Record<string, unknown>> {
   readonly topic: string;
   readonly source: string;
   readonly createdAt: string;
+  readonly correlationId?: string;
   readonly payload: TPayload;
 }
 
@@ -71,6 +72,18 @@ export interface ProposalExpiredNotification {
 export interface ProposalVetoedNotification {
   notificationType: "PROPOSAL_VETOED";
   proposalId: string;
+}
+
+export interface RecurringPaymentDueNotification {
+  notificationType: "RECURRING_PAYMENT_DUE";
+  paymentId: string;
+  recipientAddress: string;
+  tokenAddress: string;
+  amount: string;
+  intervalLedgers: number;
+  nextPaymentLedger: number;
+  missedCount: number;
+  enrichmentFailed?: boolean;
 }
 
 // ── Priority-aware publish options ────────────────────────────────────────────
