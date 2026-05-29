@@ -1,25 +1,53 @@
 import type { RequestHandler } from "express";
 import { success, error } from "../../shared/http/response.js";
 import { ErrorCode } from "../../shared/http/errorCodes.js";
+import {
+  validateEnum,
+  validatePagination,
+  validateOptionalString,
+  validateOptionalInteger,
+} from "../../shared/http/validateQuery.js";
 import type { RecurringIndexerService } from "./recurring.service.js";
-import type { RecurringStatus } from "./types.js";
+import { RecurringStatus } from "./types.js";
 
 /**
- * Get all recurring payments with optional status filter
+ * Get all recurring payments with optional status filter and pagination
  */
 export function getAllRecurringController(
   service: RecurringIndexerService,
 ): RequestHandler {
   return async (request, response) => {
-    try {
-      const status = request.query.status as string | undefined;
+    const pagination = validatePagination(request, response);
+    if (!pagination) return;
 
-      const filter = status ? { status: status as RecurringStatus } : undefined;
-      const payments = await service.getPayments(filter);
+    const status = validateEnum(
+      request,
+      response,
+      "status",
+      [RecurringStatus.ACTIVE, RecurringStatus.DUE, RecurringStatus.CANCELLED] as const,
+    );
+    if (status === null) return;
+
+    const contractId = validateOptionalString(request, "contractId");
+    const proposer = validateOptionalString(request, "proposer");
+    const recipient = validateOptionalString(request, "recipient");
+
+    try {
+      const result = await service.getPayments(
+        {
+          contractId,
+          status: status as RecurringStatus | undefined,
+          proposer,
+          recipient,
+        },
+        pagination,
+      );
 
       success(response, {
-        items: payments,
-        total: payments.length,
+        data: result.items,
+        total: result.total,
+        offset: result.offset,
+        limit: result.limit,
       });
     } catch (err) {
       error(response, {
@@ -40,11 +68,15 @@ export function getRecurringByIdController(
 ): RequestHandler {
   return async (request, response) => {
     try {
-      const id = String(request.params.id);
+      const paymentId = String(request.params.paymentId);
 
-      const payment = await service.getPayment(id);
+      const payment = await service.getPayment(paymentId);
       if (!payment) {
-        error(response, { message: "Payment not found", status: 404, code: ErrorCode.NOT_FOUND });
+        error(response, {
+          message: "Payment not found",
+          status: 404,
+          code: ErrorCode.NOT_FOUND,
+        });
         return;
       }
 
@@ -61,22 +93,109 @@ export function getRecurringByIdController(
 }
 
 /**
- * Get all payments currently due
+ * Get payments due within the next lookaheadLedgers ledgers.
+ * lookaheadLedgers: 1–17280, default 1440
  */
-export function getDueRecurringController(
+export function getDueWithLookaheadController(
   service: RecurringIndexerService,
 ): RequestHandler {
-  return async (_request, response) => {
-    try {
-      const payments = await service.getDuePayments();
+  return async (request, response) => {
+    const lookaheadRaw = validateOptionalInteger(
+      request,
+      response,
+      "lookaheadLedgers",
+      { min: 1, max: 17280 },
+    );
+    if (lookaheadRaw === null) return;
+    const lookaheadLedgers = lookaheadRaw ?? 1440;
 
+    const { lastLedgerProcessed } = service.getStatus();
+    const targetLedger = lastLedgerProcessed + lookaheadLedgers;
+
+    try {
+      const all = await service.getDuePaymentsAtLedger(targetLedger);
+      const pagination = validatePagination(request, response);
+      if (!pagination) return;
+      const data = all.slice(pagination.offset, pagination.offset + pagination.limit);
       success(response, {
-        items: payments,
-        total: payments.length,
+        data,
+        total: all.length,
+        offset: pagination.offset,
+        limit: pagination.limit,
+        lookaheadLedgers,
+        targetLedger,
       });
     } catch (err) {
       error(response, {
         message: "Failed to fetch due payments",
+        status: 500,
+        code: ErrorCode.INTERNAL_ERROR,
+        details: err instanceof Error ? err.message : undefined,
+      });
+    }
+  };
+}
+
+  service: RecurringIndexerService,
+): RequestHandler {
+  return async (request, response) => {
+    const pagination = validatePagination(request, response);
+    if (!pagination) return;
+
+    const currentLedger = validateOptionalInteger(request, response, "currentLedger", { min: 0 });
+    if (currentLedger === null) return;
+
+    try {
+      const payments =
+        currentLedger === undefined
+          ? await service.getDuePayments()
+          : await service.getDuePaymentsAtLedger(currentLedger);
+      const data = payments.slice(
+        pagination.offset,
+        pagination.offset + pagination.limit,
+      );
+
+      success(response, {
+        data,
+        total: payments.length,
+        offset: pagination.offset,
+        limit: pagination.limit,
+      });
+    } catch (err) {
+      error(response, {
+        message: "Failed to fetch due payments",
+        status: 500,
+        code: ErrorCode.INTERNAL_ERROR,
+        details: err instanceof Error ? err.message : undefined,
+      });
+    }
+  };
+}
+
+/**
+ * Trigger a manual sync cycle.
+ * Returns { synced: number, durationMs: number }.
+ * Returns 409 if a sync is already in progress.
+ */
+export function triggerSyncController(
+  service: RecurringIndexerService,
+): RequestHandler {
+  return async (_request, response) => {
+    if (service.isSyncing()) {
+      error(response, {
+        message: "Sync already in progress",
+        status: 409,
+        code: ErrorCode.BAD_REQUEST,
+      });
+      return;
+    }
+    try {
+      const start = Date.now();
+      await service.sync();
+      success(response, { synced: service.getStatus().totalPaymentsIndexed, durationMs: Date.now() - start });
+    } catch (err) {
+      error(response, {
+        message: "Sync failed",
         status: 500,
         code: ErrorCode.INTERNAL_ERROR,
         details: err instanceof Error ? err.message : undefined,

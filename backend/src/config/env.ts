@@ -6,6 +6,8 @@ export interface BackendEnv {
   readonly sorobanRpcUrl: string;
   readonly horizonUrl: string;
   readonly contractId: string;
+  readonly contractIds: string[];
+  readonly indexingParallelism: number;
   readonly websocketUrl: string;
   readonly eventPollingIntervalMs: number;
   readonly eventPollingEnabled: boolean;
@@ -17,6 +19,17 @@ export interface BackendEnv {
   readonly corsOrigin: string[];
   readonly requestBodyLimit: string;
   readonly apiKey?: string;
+  readonly cursorStorageType: "file" | "database";
+  readonly databasePath: string;
+  // Rate limiting
+  readonly rateLimitEnabled?: boolean;
+  readonly rateLimitRedisUrl?: string;
+  /** Max requests per minute for /api/v1/proposals */
+  readonly rateLimitProposalsPerMin?: number;
+  /** Max requests per minute for /api/v1/execute */
+  readonly rateLimitExecutePerMin?: number;
+  /** Default max requests per minute for all other endpoints */
+  readonly rateLimitDefaultPerMin?: number;
 }
 
 const DEFAULT_CONTRACT_ID =
@@ -28,6 +41,8 @@ const ALLOWED_STELLAR_NETWORKS = new Set([
   "futurenet",
   "standalone",
 ]);
+const ALLOWED_CURSOR_STORAGE_TYPES = new Set(["file", "database"]);
+const MIN_POLLING_INTERVAL_MS = 1000;
 
 function readValue(name: string): string | undefined {
   const value = process.env[name]?.trim();
@@ -41,7 +56,10 @@ function readString(name: string, fallback: string): string {
 function readCommaSeparatedString(name: string, fallback: string[]): string[] {
   const value = readValue(name);
   if (!value) return fallback;
-  return value.split(",").map((s) => s.trim()).filter((s) => s.length > 0);
+  return value
+    .split(",")
+    .map((s) => s.trim())
+    .filter((s) => s.length > 0);
 }
 
 function readPort(name: string, fallback: number, issues: string[]): number {
@@ -50,7 +68,9 @@ function readPort(name: string, fallback: number, issues: string[]): number {
 
   const parsed = Number(value);
   if (!Number.isInteger(parsed) || parsed < 1 || parsed > 65535) {
-    issues.push(`${name} must be an integer between 1 and 65535. Received "${value}".`);
+    issues.push(
+      `${name} must be an integer between 1 and 65535. Received "${value}".`,
+    );
     return fallback;
   }
 
@@ -138,17 +158,58 @@ export function loadEnv(): BackendEnv {
     "https://horizon-testnet.stellar.org",
   );
   const contractId = readString("CONTRACT_ID", DEFAULT_CONTRACT_ID);
+  const contractIds = readCommaSeparatedString("CONTRACT_IDS", []);
+  const indexingParallelism = readPort("INDEXING_PARALLELISM", 4, issues);
   const websocketUrl = readString("VITE_WS_URL", "ws://localhost:8080");
-  const eventPollingIntervalMs = readPort("EVENT_POLLING_INTERVAL_MS", 10000, issues);
-  const eventPollingEnabled = readString("EVENT_POLLING_ENABLED", "true") === "true";
-  const duePaymentsJobEnabled = readString("DUE_PAYMENTS_JOB_ENABLED", "true") === "true";
-  const duePaymentsJobIntervalMs = readPort("DUE_PAYMENTS_JOB_INTERVAL_MS", 60000, issues);
-  const cursorCleanupJobEnabled = readString("CURSOR_CLEANUP_JOB_ENABLED", "true") === "true";
-  const cursorCleanupJobIntervalMs = readPort("CURSOR_CLEANUP_JOB_INTERVAL_MS", 86400000, issues);
+  const eventPollingIntervalMs = readPort(
+    "EVENT_POLLING_INTERVAL_MS",
+    10000,
+    issues,
+  );
+  const eventPollingEnabled =
+    readString("EVENT_POLLING_ENABLED", "true") === "true";
+  const duePaymentsJobEnabled =
+    readString("DUE_PAYMENTS_JOB_ENABLED", "true") === "true";
+  const duePaymentsJobIntervalMs = readPort(
+    "DUE_PAYMENTS_JOB_INTERVAL_MS",
+    60000,
+    issues,
+  );
+  const cursorCleanupJobEnabled =
+    readString("CURSOR_CLEANUP_JOB_ENABLED", "true") === "true";
+  const cursorCleanupJobIntervalMs = readPort(
+    "CURSOR_CLEANUP_JOB_INTERVAL_MS",
+    86400000,
+    issues,
+  );
   const cursorRetentionDays = readPort("CURSOR_RETENTION_DAYS", 30, issues);
-  const corsOrigin = readCommaSeparatedString("CORS_ORIGIN", nodeEnv === "production" ? [] : ["*"]);
+  const corsOrigin = readCommaSeparatedString(
+    "CORS_ORIGIN",
+    nodeEnv === "production" ? [] : ["*"],
+  );
   const requestBodyLimit = readString("REQUEST_BODY_LIMIT", "10kb");
   const apiKey = readValue("API_KEY");
+  const cursorStorageType = readString("CURSOR_STORAGE_TYPE", "file") as
+    | "file"
+    | "database";
+  const databasePath = readString("DATABASE_PATH", "./vaultdao.sqlite");
+  const rateLimitEnabled = readString("RATE_LIMIT_ENABLED", "true") === "true";
+  const rateLimitRedisUrl = readValue("RATE_LIMIT_REDIS_URL");
+  const rateLimitProposalsPerMin = readPort(
+    "RATE_LIMIT_PROPOSALS_PER_MIN",
+    100,
+    issues,
+  );
+  const rateLimitExecutePerMin = readPort(
+    "RATE_LIMIT_EXECUTE_PER_MIN",
+    10,
+    issues,
+  );
+  const rateLimitDefaultPerMin = readPort(
+    "RATE_LIMIT_DEFAULT_PER_MIN",
+    60,
+    issues,
+  );
 
   validateRequiredString("HOST", host, issues);
   validateAllowedValue("NODE_ENV", nodeEnv, ALLOWED_NODE_ENVS, issues);
@@ -161,7 +222,20 @@ export function loadEnv(): BackendEnv {
   validateUrl("SOROBAN_RPC_URL", sorobanRpcUrl, ["http:", "https:"], issues);
   validateUrl("HORIZON_URL", horizonUrl, ["http:", "https:"], issues);
   validateUrl("VITE_WS_URL", websocketUrl, ["ws:", "wss:"], issues);
+
+  if (eventPollingIntervalMs < MIN_POLLING_INTERVAL_MS) {
+    issues.push(
+      `EVENT_POLLING_INTERVAL_MS must be at least ${MIN_POLLING_INTERVAL_MS}ms to prevent excessive RPC load. Received "${eventPollingIntervalMs}".`,
+    );
+  }
+
   validateContractId(contractId, nodeEnv, issues);
+  validateAllowedValue(
+    "CURSOR_STORAGE_TYPE",
+    cursorStorageType,
+    ALLOWED_CURSOR_STORAGE_TYPES,
+    issues,
+  );
 
   if (nodeEnv === "production" && corsOrigin.length === 0) {
     issues.push("CORS_ORIGIN is required in production environment.");
@@ -181,6 +255,8 @@ export function loadEnv(): BackendEnv {
     sorobanRpcUrl,
     horizonUrl,
     contractId,
+    contractIds,
+    indexingParallelism,
     websocketUrl,
     eventPollingIntervalMs,
     eventPollingEnabled,
@@ -192,5 +268,12 @@ export function loadEnv(): BackendEnv {
     corsOrigin,
     requestBodyLimit,
     apiKey,
+    cursorStorageType,
+    databasePath,
+    rateLimitEnabled,
+    rateLimitRedisUrl,
+    rateLimitProposalsPerMin,
+    rateLimitExecutePerMin,
+    rateLimitDefaultPerMin,
   };
 }

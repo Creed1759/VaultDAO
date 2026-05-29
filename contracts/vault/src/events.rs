@@ -217,6 +217,14 @@ pub fn emit_oracle_config_updated(env: &Env, admin: &Address, oracle: &Address) 
     );
 }
 
+/// Emit when a stale oracle price blocks condition evaluation
+pub fn emit_oracle_price_stale(env: &Env, asset: &Address, price_ledger: u64, current_ledger: u64) {
+    env.events().publish(
+        (Symbol::new(env, "oracle_price_stale"),),
+        (asset.clone(), price_ledger, current_ledger),
+    );
+}
+
 /// Emit when quorum configuration is updated by admin
 pub fn emit_quorum_updated(env: &Env, admin: &Address, old_quorum: u32, new_quorum: u32) {
     env.events().publish(
@@ -230,6 +238,14 @@ pub fn emit_quorum_reached(env: &Env, proposal_id: u64, quorum_votes: u32, requi
     env.events().publish(
         (Symbol::new(env, "quorum_reached"), proposal_id),
         (quorum_votes, required_quorum),
+    );
+}
+
+/// Emit when a proposal's threshold is reduced due to time-based strategy
+pub fn emit_threshold_reduced(env: &Env, proposal_id: u64, old_threshold: u32, new_threshold: u32) {
+    env.events().publish(
+        (Symbol::new(env, "threshold_reduced"), proposal_id),
+        (old_threshold, new_threshold),
     );
 }
 
@@ -360,6 +376,14 @@ pub fn emit_batch_executed(env: &Env, executor: &Address, executed_count: u32, f
     );
 }
 
+/// Emit when a batch execution partially failed and was rolled back
+pub fn emit_batch_rolled_back(env: &Env, executor: &Address, rolled_back_count: u32) {
+    env.events().publish(
+        (Symbol::new(env, "batch_rolled_back"),),
+        (executor.clone(), rolled_back_count),
+    );
+}
+
 // ============================================================================
 // Notification Events (feature/execution-notifications)
 // ============================================================================
@@ -407,10 +431,10 @@ pub fn emit_hook_removed(env: &Env, hook: &Address, is_pre: bool) {
 }
 
 /// Emit when a hook is executed
-pub fn emit_hook_executed(env: &Env, hook: &Address, proposal_id: u64, is_pre: bool) {
+pub fn emit_hook_executed(env: &Env, hook: &Address, proposal_id: u64, is_pre: bool, success: bool) {
     env.events().publish(
         (Symbol::new(env, "hook_executed"), proposal_id),
-        (hook.clone(), is_pre),
+        (hook.clone(), is_pre, success),
     );
 }
 
@@ -545,6 +569,14 @@ pub fn emit_template_updated(
     env.events().publish(
         (Symbol::new(env, "template_updated"), template_id),
         (name.clone(), version, updater.clone()),
+    );
+}
+
+/// Emit when the oldest stored template version is pruned due to the 10-version cap
+pub fn emit_template_version_pruned(env: &Env, template_id: u64, pruned_version: u32) {
+    env.events().publish(
+        (Symbol::new(env, "template_ver_pruned"), template_id),
+        pruned_version,
     );
 }
 
@@ -965,6 +997,45 @@ pub fn emit_dex_config_updated(env: &Env, admin: &Address) {
         .publish((Symbol::new(env, "dex_cfg_updated"),), admin.clone());
 }
 
+/// Emit event when a swap is executed
+pub fn emit_swap_executed(
+    env: &Env,
+    proposal_id: u64,
+    dex: &Address,
+    token_in: &Address,
+    token_out: &Address,
+    amount_in: i128,
+    amount_out: i128,
+) {
+    env.events().publish(
+        (Symbol::new(env, "swap_executed"),),
+        (proposal_id, dex.clone(), token_in.clone(), token_out.clone(), amount_in, amount_out),
+    );
+}
+
+/// Emit event when liquidity is added
+pub fn emit_liquidity_added(
+    env: &Env,
+    proposal_id: u64,
+    dex: &Address,
+    token_a: &Address,
+    token_b: &Address,
+    amount_a: i128,
+    amount_b: i128,
+    lp_tokens: i128,
+) {
+    env.events().publish(
+        (Symbol::new(env, "liquidity_added"),),
+        (proposal_id, dex.clone(), token_a.clone(), token_b.clone(), amount_a, amount_b, lp_tokens),
+    );
+}
+
+/// Emit event when LP tokens are unstaked
+pub fn emit_lp_unstaked(env: &Env, proposal_id: u64, farm: &Address, amount: i128) {
+    env.events()
+        .publish((Symbol::new(env, "lp_unstaked"),), (proposal_id, farm.clone(), amount));
+}
+
 pub fn emit_stream_created(
     env: &Env,
     stream_id: u64,
@@ -983,6 +1054,14 @@ pub fn emit_stream_created(
             total_amount,
             rate,
         ),
+    );
+}
+
+/// Emit when a stream rate is adjusted
+pub fn emit_stream_rate_adjusted(env: &Env, stream_id: u64, old_rate: i128, new_rate: i128, adjusted_by: &Address) {
+    env.events().publish(
+        (Symbol::new(env, "stream_rate_adj"), stream_id),
+        (old_rate, new_rate, adjusted_by.clone()),
     );
 }
 
@@ -1070,5 +1149,59 @@ pub fn emit_dispute_resolved(env: &Env, dispute_id: u64, admin: &Address, resolu
     env.events().publish(
         (Symbol::new(env, "dispute_resolved"), dispute_id),
         (admin.clone(), resolution),
+    );
+}
+
+// ============================================================================
+// Bridge Events (feature/cross-chain-bridge)
+// ============================================================================
+
+/// Emit when a bridge transfer proposal is created
+pub fn emit_bridge_proposed(env: &Env, proposal_id: u64, proposer: &Address, asset_count: u32) {
+    env.events().publish(
+        (Symbol::new(env, "bridge_proposed"), proposal_id),
+        (proposer.clone(), asset_count),
+    );
+}
+
+/// Emit when a bridge proposal is executed
+pub fn emit_bridge_executed(env: &Env, proposal_id: u64, executor: &Address, success_count: u32) {
+    env.events().publish(
+        (Symbol::new(env, "bridge_executed"), proposal_id),
+        (executor.clone(), success_count),
+    );
+}
+
+/// Emit when bridge configuration is updated
+pub fn emit_bridge_config_updated(env: &Env, admin: &Address) {
+    env.events()
+        .publish((Symbol::new(env, "bridge_cfg_updated"),), admin.clone());
+}
+
+/// Emit when reputation config is updated
+pub fn emit_reputation_config_updated(env: &Env, admin: &Address) {
+    env.events()
+        .publish((Symbol::new(env, "rep_config_updated"),), admin.clone());
+}
+
+/// Emit when a comment is deleted (soft delete)
+pub fn emit_comment_deleted(env: &Env, comment_id: u64, caller: &Address) {
+    env.events().publish(
+        (Symbol::new(env, "comment_deleted"), comment_id),
+        caller.clone(),
+    );
+}
+
+/// Emit when metrics bucket is updated with current week stats
+pub fn emit_metrics_bucket_updated(
+    env: &Env,
+    week: u64,
+    executed: u64,
+    rejected: u64,
+    expired: u64,
+) {
+    env.events().publish(
+        (Symbol::new(env, "metrics_bucket_upd"), week),
+        (executed, rejected, expired),
     );
 }

@@ -1,4 +1,6 @@
-import React, { useState, useMemo, useRef, useCallback } from 'react';
+import React, { useState, useEffect, useMemo, useCallback } from 'react';
+import { RefreshCw } from 'lucide-react';
+import { useVaultContract } from '../../hooks/useVaultContract';
 import type { AnalyticsTimeRange, ActivityLike } from '../../types/analytics';
 import { aggregateAnalytics } from '../../utils/analyticsAggregation';
 import { exportAnalyticsToCsv, exportChartAsImage } from '../../utils/exportAnalytics';
@@ -72,10 +74,10 @@ function getMockActivities(): ActivityLike[] {
 }
 
 const TIME_RANGES: { value: AnalyticsTimeRange; label: string }[] = [
-  { value: '7d', label: '7 days' },
-  { value: '30d', label: '30 days' },
-  { value: '90d', label: '90 days' },
-  { value: '1y', label: '1 year' },
+  { value: '7d', label: '7d' },
+  { value: '30d', label: '30d' },
+  { value: '90d', label: '90d' },
+  { value: '1y', label: '1y' },
   { value: 'all', label: 'All' },
 ];
 
@@ -114,69 +116,39 @@ const Analytics: React.FC = () => {
   const heatmapRef = useRef<HTMLDivElement>(null);
   const timelineChartRef = useRef<HTMLDivElement>(null);
 
-  const activities = useMemo(() => getMockActivities(), []);
+const SkeletonCard: React.FC = () => (
+  <div className="bg-gray-800/60 border border-gray-700/60 rounded-xl p-4 sm:p-5 animate-pulse">
+    <div className="h-4 w-32 bg-gray-700 rounded mb-4" />
+    <div className="h-52 bg-gray-700/50 rounded" />
+  </div>
+);
 
-  const analytics = useMemo(
-    () => (loading ? null : aggregateAnalytics(activities, timeRange)),
-    [activities, timeRange, loading]
-  );
+const Analytics: React.FC = () => {
+  const { getVaultEvents } = useVaultContract();
+  const [timeRange, setTimeRange] = useState<AnalyticsTimeRange>('30d');
+  const [activities, setActivities] = useState<ActivityLike[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
 
-  const transactions = useMemo(() => {
-    return activities
-      .filter(a => a.type === 'proposal_executed')
-      .map(a => ({
-        amount: Number(a.details?.amount || 0),
-        timestamp: a.timestamp,
-        recipient: String(a.details?.recipient || 'unknown')
-      }));
-  }, [activities]);
+  const fetchActivities = useCallback(async () => {
+    setLoading(true);
+    setError(null);
+    try {
+      const result = await getVaultEvents(undefined, 200);
+      setActivities(result.activities as ActivityLike[]);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Failed to load analytics data');
+    } finally {
+      setLoading(false);
+    }
+  }, [getVaultEvents]);
 
-  const insights = useMemo(() => {
-    if (!analytics) return [];
-    const list: { text: string; type: 'info' | 'warning' | 'success' }[] = [];
-    if (analytics.pendingCount > 0) {
-      list.push({
-        text: `${analytics.pendingCount} proposal(s) pending approval`,
-        type: 'info',
-      });
-    }
-    if (analytics.approvalRate >= 80) {
-      list.push({ text: `Approval rate is ${analytics.approvalRate.toFixed(0)}%`, type: 'success' });
-    } else if (analytics.approvalRate > 0) {
-      list.push({
-        text: `Approval rate is ${analytics.approvalRate.toFixed(0)}%`,
-        type: 'info',
-      });
-    }
-    if (analytics.dailyLimitUsedPercent != null && analytics.dailyLimitUsedPercent >= 80) {
-      list.push({
-        text: `Daily limit ${analytics.dailyLimitUsedPercent.toFixed(0)}% used`,
-        type: 'warning',
-      });
-    }
-    if (analytics.totalVolume > 0) {
-      list.push({
-        text: `Total volume: ${analytics.totalVolume.toLocaleString()} units`,
-        type: 'info',
-      });
-    }
-    if (list.length === 0) {
-      list.push({ text: 'No recent activity in this range', type: 'info' });
-    }
-    return list;
-  }, [analytics]);
+  useEffect(() => { fetchActivities(); }, [fetchActivities]);
 
-  const handleExportCsv = useCallback(() => {
-    if (analytics) exportAnalyticsToCsv(analytics);
-  }, [analytics]);
-
-  const handleExportChart = useCallback((ref: React.RefObject<HTMLDivElement | null>, name: string) => {
-    if (exporting) return;
-    setExporting(true);
-    exportChartAsImage(ref.current, `analytics-${name}.png`);
-    // exportChartAsImage is async internally; reset after a short delay
-    setTimeout(() => setExporting(false), 3000);
-  }, [exporting]);
+  const spending = useMemo(() => aggregateDailySpending(activities, timeRange), [activities, timeRange]);
+  const outcomes = useMemo(() => aggregateProposalOutcomes(activities, timeRange), [activities, timeRange]);
+  const recipients = useMemo(() => aggregateTopRecipients(activities, timeRange), [activities, timeRange]);
+  const signers = useMemo(() => aggregateSignerParticipation(activities, timeRange), [activities, timeRange]);
 
   const executionTimeline = useMemo(() => buildExecutionTimeline(activities), [activities]);
 
@@ -216,10 +188,11 @@ const Analytics: React.FC = () => {
 
   return (
     <div className="space-y-6">
+      {/* Header */}
       <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
         <div>
-          <h2 className="text-3xl font-bold">Analytics</h2>
-          <p className="text-gray-400 mt-1">Charts, trends, and insights about vault activity.</p>
+          <h1 className="text-2xl sm:text-3xl font-bold text-white">Analytics</h1>
+          <p className="text-gray-400 mt-1">Spending trends, proposal outcomes, and signer activity</p>
         </div>
         <div className="flex flex-wrap items-center gap-2">
           {/* Quick date range toggles */}
@@ -246,9 +219,17 @@ const Analytics: React.FC = () => {
             aria-label="Select analytics date range"
           >
             {TIME_RANGES.map((r) => (
-              <option key={r.value} value={r.value}>
+              <button
+                key={r.value}
+                onClick={() => setTimeRange(r.value)}
+                className={`px-3 py-1.5 rounded-md text-sm font-medium transition-colors ${
+                  timeRange === r.value
+                    ? 'bg-purple-600 text-white'
+                    : 'text-gray-400 hover:text-gray-200'
+                }`}
+              >
                 {r.label}
-              </option>
+              </button>
             ))}
           </select>
 
@@ -287,79 +268,29 @@ const Analytics: React.FC = () => {
         </div>
       </div>
 
-      {/* Tabs */}
-      <div className="flex gap-2 border-b border-gray-700">
-        <button
-          onClick={() => setActiveTab('overview')}
-          className={`px-4 py-2 text-sm font-medium transition-colors ${
-            activeTab === 'overview'
-              ? 'text-purple-400 border-b-2 border-purple-400'
-              : 'text-gray-400 hover:text-gray-300'
-          }`}
-        >
-          Overview
-        </button>
-        <button
-          onClick={() => setActiveTab('spending')}
-          className={`px-4 py-2 text-sm font-medium transition-colors ${
-            activeTab === 'spending'
-              ? 'text-purple-400 border-b-2 border-purple-400'
-              : 'text-gray-400 hover:text-gray-300'
-          }`}
-        >
-          Spending Analytics
-        </button>
-        <button
-          onClick={() => setActiveTab('advanced')}
-          className={`px-4 py-2 text-sm font-medium transition-colors ${
-            activeTab === 'advanced'
-              ? 'text-purple-400 border-b-2 border-purple-400'
-              : 'text-gray-400 hover:text-gray-300'
-          }`}
-        >
-          Advanced Chart
-        </button>
-      </div>
+      {/* Error state */}
+      {error && (
+        <div className="bg-red-500/10 border border-red-500/30 rounded-xl p-4 text-red-400 text-sm">
+          {error}
+        </div>
+      )}
 
+      {/* Loading skeletons */}
       {loading && (
-        <div className="flex justify-center py-12">
-          <div className="animate-spin rounded-full h-10 w-10 border-2 border-purple-500 border-t-transparent" />
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+          <SkeletonCard />
+          <SkeletonCard />
+          <SkeletonCard />
+          <SkeletonCard />
         </div>
       )}
 
-      {!loading && analytics && activeTab === 'advanced' && (
-        <div className="space-y-6">
-          <AdvancedChart
-            data={analytics.proposalTrends as unknown as Record<string, unknown>[]}
-            xKey="date"
-            series={[
-              { dataKey: 'created', name: 'Created', color: '#818cf8' },
-              { dataKey: 'approved', name: 'Approved', color: '#34d399' },
-              { dataKey: 'executed', name: 'Executed', color: '#22c55e' },
-            ]}
-            title="Proposal trends (advanced)"
-            height={360}
-            valueKey="created"
-            configKey="proposal-trends"
-          />
-          <AdvancedChart
-            data={analytics.treasuryBalance as unknown as Record<string, unknown>[]}
-            xKey="date"
-            series={[{ dataKey: 'total', name: 'Cumulative volume', color: '#8b5cf6' }]}
-            title="Treasury / cumulative volume (advanced)"
-            height={360}
-            valueKey="total"
-            configKey="treasury-balance"
-          />
+      {/* Empty state */}
+      {!loading && !error && !hasData && (
+        <div className="bg-gray-800/40 border border-gray-700 rounded-xl p-12 text-center">
+          <p className="text-gray-400 text-lg font-medium">No data for this time range</p>
+          <p className="text-gray-500 text-sm mt-1">Try selecting a wider range or perform vault actions first.</p>
         </div>
-      )}
-
-      {!loading && analytics && activeTab === 'spending' && (
-        <SpendingAnalytics
-          transactions={transactions}
-          currentBalance={analytics.totalVolume}
-          monthlyBudget={50000}
-        />
       )}
 
       {!loading && analytics && activeTab === 'overview' && (
@@ -519,13 +450,10 @@ const Analytics: React.FC = () => {
             </div>
           </div>
 
-          {!hasData && (
-            <div className="bg-gray-800 rounded-xl border border-gray-700 p-12 text-center">
-              <p className="text-gray-400">No data in this time range.</p>
-              <p className="text-sm text-gray-500 mt-1">Try selecting a different range or run more vault actions.</p>
-            </div>
-          )}
-        </>
+          <ChartCard title="Signer Participation">
+            <SignerParticipationTable data={signers} />
+          </ChartCard>
+        </div>
       )}
     </div>
   );

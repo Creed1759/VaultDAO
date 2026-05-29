@@ -106,6 +106,18 @@ const NotificationCenter: React.FC<NotificationCenterProps> = ({ isOpen, onClose
   const [grouped, setGrouped] = useState(true);
 
   const panelRef = useRef<HTMLDivElement>(null);
+  const prevIsOpenRef = useRef(isOpen);
+
+  // Sync local filter state from context when panel opens
+  useEffect(() => {
+    // Only sync when transitioning from closed to open
+    if (isOpen && !prevIsOpenRef.current) {
+      setSelectedCategories(filter.categories);
+      setSelectedPriorities(filter.priorities);
+      setSelectedStatus(filter.status || 'all');
+    }
+    prevIsOpenRef.current = isOpen;
+  }, [isOpen, filter]);
 
   // Request browser notification permission on mount
   useEffect(() => {
@@ -155,6 +167,11 @@ const NotificationCenter: React.FC<NotificationCenterProps> = ({ isOpen, onClose
 
     return grouped ? groupNotifications(filtered) : filtered;
   }, [tabFiltered, filter, sort, grouped]);
+
+  // Reset page when filtered notifications change (e.g., new notifications arrive)
+  useEffect(() => {
+    setPage(1);
+  }, [filteredNotifications.length, setPage]);
 
   // Pagination
   const totalPages = Math.ceil(filteredNotifications.length / pageSize);

@@ -1,20 +1,36 @@
 import express, { Request, Response, NextFunction } from "express";
 import type { BackendEnv } from "./config/env.js";
 import type { BackendRuntime } from "./server.js";
-import { createHealthRouter, createStatusRouter } from "./modules/health/health.routes.js";
+import {
+  createHealthRouter,
+  createStatusRouter,
+  createMetricsRouter,
+  createDetailedHealthRouter,
+} from "./modules/health/health.routes.js";
+import { createContractsRouter } from "./modules/contracts/contracts.controller.js";
 import { createSnapshotRouter } from "./modules/snapshots/snapshots.routes.js";
 import { createProposalsRouter } from "./modules/proposals/proposals.routes.js";
 import { createRecurringRouter } from "./modules/recurring/recurring.routes.js";
+import { createTransactionsRouter } from "./modules/transactions/transactions.routes.js";
+import { createAuditRouter } from "./modules/audit/audit.routes.js";
+import { createNotificationsRouter } from "./modules/notifications/notifications.routes.js";
+import { createWebhookRouter } from "./modules/notifications/webhook.routes.js";
+import { createCacheRouter } from "./shared/cache/cache.routes.js";
+import { createVaultRouter } from "./modules/vault/vault.routes.js";
+import { createCursorsRouter } from "./modules/events/cursor/cursors.routes.js";
 import { error } from "./shared/http/response.js";
 import { createRateLimitMiddleware } from "./shared/http/rateLimit.js";
-import { createAuthMiddleware } from "./shared/http/auth.js";
+import { createAuthMiddleware, requireApiKey } from "./shared/http/auth.js";
 import { ErrorCode } from "./shared/http/errorCodes.js";
 import {
   REQUEST_ID_HEADER,
   generateRequestId,
+  requestIdStorage,
 } from "./shared/http/requestId.js";
+import { createRequestLogger } from "./shared/http/requestLogger.js";
+import { createErrorMiddleware } from "./shared/errors/handleError.js";
 
-export function createApp(env: BackendEnv, runtime: BackendRuntime) {
+export async function createApp(env: BackendEnv, runtime: BackendRuntime) {
   const app = express();
 
   // Remove X-Powered-By header
@@ -39,22 +55,33 @@ export function createApp(env: BackendEnv, runtime: BackendRuntime) {
     const origin = req.get("Origin");
 
     const isAllowed =
-      env.corsOrigin.includes("*") || (origin && env.corsOrigin.includes(origin));
+      env.corsOrigin.includes("*") ||
+      (origin && env.corsOrigin.includes(origin));
+
+    // In production, actively reject disallowed origins with a 403.
+    // Requests with no Origin header (server-to-server, curl) are allowed.
+    if (env.nodeEnv === "production" && origin && !isAllowed) {
+      error(res, {
+        message: "Forbidden: Origin not allowed",
+        status: 403,
+        code: ErrorCode.FORBIDDEN,
+      });
+      return;
+    }
 
     if (isAllowed && origin) {
       res.set("Access-Control-Allow-Origin", origin);
+      res.set("Vary", "Origin");
     } else if (env.corsOrigin.includes("*")) {
       res.set("Access-Control-Allow-Origin", "*");
     }
 
-    res.set(
-      "Access-Control-Allow-Methods",
-      "GET, POST, PUT, DELETE, PATCH, OPTIONS",
-    );
+    res.set("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
     res.set(
       "Access-Control-Allow-Headers",
-      `Content-Type, Authorization, ${REQUEST_ID_HEADER}`,
+      `Content-Type, Authorization, X-API-Key, ${REQUEST_ID_HEADER}`,
     );
+    res.set("Access-Control-Expose-Headers", REQUEST_ID_HEADER);
 
     if (req.method === "OPTIONS") {
       res.sendStatus(204);
@@ -66,56 +93,169 @@ export function createApp(env: BackendEnv, runtime: BackendRuntime) {
 
   // Request ID middleware
   app.use((req: Request, res: Response, next: NextFunction) => {
-    if (!req.get(REQUEST_ID_HEADER)) {
-      const id = generateRequestId();
-      res.set(REQUEST_ID_HEADER, id);
-      (req as any).requestId = id;
-    } else {
-      (req as any).requestId = req.get(REQUEST_ID_HEADER)!;
-    }
-    next();
+    const id = req.get(REQUEST_ID_HEADER) ?? generateRequestId();
+    res.set(REQUEST_ID_HEADER, id);
+    (req as any).requestId = id;
+    requestIdStorage.run(id, next);
   });
 
-  // Rate limiting middleware
-  const rateLimiter = createRateLimitMiddleware({
-    windowMs: 60 * 1000, // 1 minute
-    maxRequests: 100, // 100 requests per minute
+  // Rate limiting middleware — different limits per endpoint type
+  // Health/readiness probes: 300 req/min (high-frequency monitoring)
+  const healthRateLimiter = createRateLimitMiddleware({
+    windowMs: 60 * 1000,
+    maxRequests: 300,
   });
-  app.use(rateLimiter);
+  app.use("/health", healthRateLimiter);
+  app.use("/ready", healthRateLimiter);
+
+  // Write endpoints (POST/PUT/PATCH/DELETE): 10 req/min
+  const writeRateLimiter = createRateLimitMiddleware({
+    windowMs: 60 * 1000,
+    maxRequests: 10,
+  });
+  // Read endpoints (GET): 100 req/min
+  const readRateLimiter = createRateLimitMiddleware({
+    windowMs: 60 * 1000,
+    maxRequests: 100,
+  });
+  // Apply method-aware rate limiter to all /api/v1 routes
+  app.use("/api/v1", (req: Request, res: Response, next: NextFunction) => {
+    if (["POST", "PUT", "PATCH", "DELETE"].includes(req.method)) {
+      writeRateLimiter(req, res, next);
+    } else {
+      readRateLimiter(req, res, next);
+    }
+  });
+
+  // Request logging middleware (after request ID so requestId is available)
+  app.use(createRequestLogger());
 
   app.use(express.json({ limit: env.requestBodyLimit }));
 
   const authMiddleware = createAuthMiddleware(env.apiKey);
+  const adminAuthMiddleware = requireApiKey(env.apiKey);
 
   app.use(createHealthRouter(env, runtime));
-  
+
+  // Public Prometheus scrape endpoint
+  app.get("/metrics", (_req, res) => {
+    res
+      .status(200)
+      .set("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
+      .send(runtime.metricsRegistry.render());
+  });
+
   const v1Router = express.Router();
-  
+
   v1Router.use("/status", createStatusRouter(env, runtime));
-  
+  v1Router.use("/metrics", createMetricsRouter(runtime, adminAuthMiddleware));
+  v1Router.use("/health", createDetailedHealthRouter(env, runtime));
+
+  // Contracts listing
+  const registry = new (
+    await import("./modules/contracts/contract-registry.js")
+  ).default(env);
+  // Sync lastIndexedLedger from running pollers
+  if (runtime.eventPollingServices) {
+    const ids =
+      env.contractIds && env.contractIds.length > 0
+        ? env.contractIds
+        : [env.contractId];
+    for (let i = 0; i < ids.length; i++) {
+      const poller = (runtime.eventPollingServices as any)[i];
+      if (poller) {
+        const status = poller.getStatus();
+        registry.updateLastLedger(ids[i]!, status.lastLedgerPolled);
+      }
+    }
+  }
+  v1Router.use("/contracts", createContractsRouter(registry, adminAuthMiddleware));
+
   v1Router.use(
     "/snapshots",
     authMiddleware,
-    createSnapshotRouter(runtime.snapshotService)
+    createSnapshotRouter(runtime.snapshotService, adminAuthMiddleware, runtime.snapshotDiffService),
   );
-  
+
   v1Router.use(
     "/proposals",
     authMiddleware,
-    createProposalsRouter(runtime.proposalActivityAggregator)
+    createProposalsRouter(
+      runtime.proposalActivityAggregator,
+      runtime.proposalActivityPersistence,
+    ),
   );
-  
+
   v1Router.use(
     "/recurring",
     authMiddleware,
-    createRecurringRouter(runtime.recurringIndexerService)
+    createRecurringRouter(runtime.recurringIndexerService, authMiddleware),
+  );
+
+  v1Router.use(
+    "/transactions",
+    authMiddleware,
+    createTransactionsRouter(runtime.transactionsService, env.contractId),
+  );
+
+  v1Router.use("/audit", authMiddleware, createAuditRouter(env.sorobanRpcUrl, adminAuthMiddleware));
+
+  if (runtime.notificationQueue) {
+    v1Router.use(
+      "/notifications",
+      authMiddleware,
+      createNotificationsRouter(runtime.notificationQueue),
+    );
+  }
+
+  if (runtime.webhookDeliveryService) {
+    v1Router.use(
+      "/webhooks",
+      authMiddleware,
+      createWebhookRouter(runtime.webhookDeliveryService),
+    );
+  }
+
+  if (runtime.cacheManager) {
+    v1Router.use(
+      "/cache",
+      authMiddleware,
+      createCacheRouter(runtime.cacheManager),
+    );
+  }
+
+  if (runtime.dbCursorAdapter) {
+    v1Router.use(
+      "/cursors",
+      createCursorsRouter(runtime.dbCursorAdapter, adminAuthMiddleware),
+    );
+  }
+
+  const networkPassphrases: Record<string, string> = {
+    testnet: "Test SDF Network ; September 2015",
+    mainnet: "Public Global Stellar Network ; October 2015",
+    futurenet: "Test SDF Future Network ; October 2022",
+    standalone: "Standalone Network ; Latitude 0",
+  };
+  const passphrase = networkPassphrases[env.stellarNetwork?.toLowerCase() ?? "testnet"] ?? networkPassphrases.testnet;
+
+  v1Router.use(
+    "/vault",
+    authMiddleware,
+    createVaultRouter(env.sorobanRpcUrl, passphrase, runtime.cacheManager),
   );
 
   app.use("/api/v1", v1Router);
 
   app.use((_request, response) => {
-    error(response, { message: "Not Found", status: 404, code: ErrorCode.NOT_FOUND });
+    error(response, {
+      message: "Not Found",
+      status: 404,
+      code: ErrorCode.NOT_FOUND,
+    });
   });
+
+  app.use(createErrorMiddleware(env));
 
   return app;
 }
