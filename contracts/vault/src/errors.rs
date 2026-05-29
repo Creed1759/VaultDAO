@@ -59,9 +59,8 @@ pub enum VaultError {
     SignerAlreadyExists = 80,
     /// Signer does not exist in the signer set
     SignerNotFound = 81,
-    /// Cannot remove signer as it would violate threshold requirements
-    CannotRemoveSigner = 82,
-    /// Recipient address is on the blacklist
+    CannotAssignHigherRole = 82,
+    RecipientNotWhitelisted = 90,
     RecipientBlacklisted = 91,
     /// Address is already on the list
     AddressAlreadyOnList = 92,
