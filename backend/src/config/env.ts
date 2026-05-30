@@ -24,6 +24,7 @@ export interface BackendEnv {
   // Rate limiting
   readonly rateLimitEnabled?: boolean;
   readonly rateLimitRedisUrl?: string;
+  readonly redisTls?: boolean;
   /** Max requests per minute for /api/v1/proposals */
   readonly rateLimitProposalsPerMin?: number;
   /** Max requests per minute for /api/v1/execute */
@@ -265,6 +266,7 @@ export function loadEnv(): BackendEnv {
   const databasePath = readString("DATABASE_PATH", "./vaultdao.sqlite");
   const rateLimitEnabled = readString("RATE_LIMIT_ENABLED", "true") === "true";
   const rateLimitRedisUrl = readValue("RATE_LIMIT_REDIS_URL");
+  const redisTls = readString("REDIS_TLS", "false") === "true";
   const rateLimitProposalsPerMin = readPort(
     "RATE_LIMIT_PROPOSALS_PER_MIN",
     100,
@@ -292,6 +294,10 @@ export function loadEnv(): BackendEnv {
   validateUrl("SOROBAN_RPC_URL", sorobanRpcUrl, ["http:", "https:"], issues);
   validateUrl("HORIZON_URL", horizonUrl, ["http:", "https:"], issues);
   validateUrl("VITE_WS_URL", websocketUrl, ["ws:", "wss:"], issues);
+  
+  if (rateLimitRedisUrl) {
+    validateUrl("RATE_LIMIT_REDIS_URL", rateLimitRedisUrl, ["redis:", "rediss:", "redis://", "rediss://"], issues);
+  }
 
   if (eventPollingIntervalMs < MIN_POLLING_INTERVAL_MS) {
     issues.push(
@@ -344,6 +350,7 @@ export function loadEnv(): BackendEnv {
     databasePath,
     rateLimitEnabled,
     rateLimitRedisUrl,
+    redisTls,
     rateLimitProposalsPerMin,
     rateLimitExecutePerMin,
     rateLimitDefaultPerMin,

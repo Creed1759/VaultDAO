@@ -254,7 +254,7 @@ export async function createApp(env: BackendEnv, runtime: BackendRuntime) {
   v1Router.use(
     "/recurring",
     authMiddleware,
-    createRecurringRouter(runtime.recurringIndexerService, authMiddleware),
+    createRecurringRouter(runtime.recurringIndexerService, authMiddleware, runtime.cacheManager),
   );
 
   v1Router.use(
