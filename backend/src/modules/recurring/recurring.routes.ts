@@ -5,15 +5,20 @@ import {
   getAllRecurringController,
   getRecurringByIdController,
   getDueWithLookaheadController,
+  getOverdueRecurringController,
+  getRecurringHistoryController,
   triggerSyncController,
 } from "./recurring.controller.js";
 
 /**
  * Creates the recurring payments router with all API endpoints
  */
+import type { CacheAdapter } from "../../shared/cache/cache.adapter.js";
+
 export function createRecurringRouter(
   service: RecurringIndexerService,
   authMiddleware?: RequestHandler,
+  cache?: CacheAdapter<unknown>,
 ) {
   const router = Router();
 
@@ -37,12 +42,24 @@ export function createRecurringRouter(
   /**
    * GET /api/v1/recurring
    */
-  router.get("/", getAllRecurringController(service));
-
+  router.get("/", getAllRecurringController(service, cache));
+  
+  /**
+   * GET /api/v1/recurring/overdue
+   * Returns only overdue payments sorted by most-overdue first
+   */
+  router.get("/overdue", getOverdueRecurringController(service, cache));
+  
   /**
    * GET /api/v1/recurring/:id
    */
-  router.get("/:paymentId", getRecurringByIdController(service));
+  router.get(":/paymentId", getRecurringByIdController(service, cache));
+  
+  /**
+   * GET /api/v1/recurring/:id/history
+   * Returns execution history from indexed events
+   */
+  router.get(":/paymentId/history", getRecurringHistoryController(service, cache));
 
   return router;
 }
