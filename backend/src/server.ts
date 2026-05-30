@@ -25,6 +25,9 @@ import {
 } from "./modules/proposals/index.js";
 import { EventWebSocketServer } from "./modules/websocket/websocket.server.js";
 import { JobManager } from "./modules/jobs/job.manager.js";
+import { ScheduledJobRunner } from "./modules/jobs/scheduled-job-runner.js";
+import { CursorStorageCleanupJob } from "./modules/jobs/recurring/cursor-storage-cleanup.job.js";
+import { registerDuePaymentsJob } from "./modules/jobs/recurring/due-payments-job.js";
 import type { NotificationQueue } from "./modules/notifications/notification.types.js";
 import { PriorityNotificationQueue } from "./modules/notifications/priority-queue.js";
 import { WebhookDeliveryService } from "./modules/notifications/webhook.service.js";
@@ -47,6 +50,7 @@ export interface BackendRuntime {
   >;
   readonly transactionsService: TransactionsService;
   readonly jobManager: JobManager;
+  readonly scheduledJobRunner: ScheduledJobRunner;
   readonly wsServer?: EventWebSocketServer;
   readonly metricsRegistry: MetricsRegistry;
   readonly notificationQueue?: PriorityNotificationQueue;
@@ -98,6 +102,10 @@ export async function startServer(
 
   // Priority notification queue (replaces basic InMemoryNotificationQueue)
   const priorityNotificationQueue = new PriorityNotificationQueue();
+  const jobNotificationPublisher = notificationQueue ?? priorityNotificationQueue;
+  const scheduledJobRunner = new ScheduledJobRunner({
+    notificationPublisher: jobNotificationPublisher,
+  });
 
   // Webhook delivery service
   const webhookDeliveryService = new WebhookDeliveryService();
@@ -138,6 +146,7 @@ export async function startServer(
     proposalActivityPersistence,
     transactionsService,
     jobManager,
+    scheduledJobRunner,
     metricsRegistry,
     notificationQueue: priorityNotificationQueue,
     webhookDeliveryService,
@@ -171,6 +180,24 @@ export async function startServer(
       : new FileCursorAdapter();
 
   runtime.dbCursorAdapter = dbCursorAdapter;
+
+  if (env.cursorCleanupJobEnabled) {
+    scheduledJobRunner.register(
+      new CursorStorageCleanupJob(
+        env.cursorCleanupJobIntervalMs,
+        true,
+        cursorStorage,
+        env.cursorRetentionDays,
+      ),
+    );
+  }
+
+  registerDuePaymentsJob(
+    scheduledJobRunner,
+    env,
+    recurringIndexerService,
+    jobNotificationPublisher,
+  );
 
   // Multi-contract indexing: determine contract IDs to index
   const contractIds =
@@ -243,6 +270,7 @@ export async function startServer(
   );
 
   void jobManager.startAll();
+  scheduledJobRunner.start();
 
   return { server, runtime: runtime as BackendRuntime };
 }

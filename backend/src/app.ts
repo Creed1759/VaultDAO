@@ -147,6 +147,27 @@ export async function createApp(env: BackendEnv, runtime: BackendRuntime) {
 
   const v1Router = express.Router();
 
+  v1Router.get("/jobs", adminAuthMiddleware, (_req, res) => {
+    const jobs = runtime.scheduledJobRunner.getJobStatuses();
+    res.status(200).json({ success: true, data: jobs });
+  });
+
+  v1Router.post("/jobs/:name/trigger", adminAuthMiddleware, (req, res) => {
+    const name = String(req.params.name ?? "").trim();
+    const triggered = runtime.scheduledJobRunner.trigger(name);
+
+    if (!triggered) {
+      error(res, {
+        message: `Job not found: ${name}`,
+        status: 404,
+        code: ErrorCode.NOT_FOUND,
+      });
+      return;
+    }
+
+    res.status(202).json({ success: true, data: { triggered: true } });
+  });
+
   v1Router.use("/status", createStatusRouter(env, runtime));
   v1Router.use("/metrics", createMetricsRouter(runtime, adminAuthMiddleware));
   v1Router.use("/health", createDetailedHealthRouter(env, runtime));
