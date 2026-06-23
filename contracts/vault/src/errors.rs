@@ -126,8 +126,11 @@ pub enum VaultError {
     InsufficientVerifications = 511,
 
     PermissionExpired = 320,
-    
+
     PermissionNotFound = 321,
+
+    /// Subscription is currently paused
+    SubscriptionPaused = 1020,
 }
 
 // Additional error types that exceed contracterror limits - use generic errors above
