@@ -254,6 +254,12 @@ impl VaultDAO {
             recovery_config: config.recovery_config.clone(),
             staking_config: config.staking_config,
             proposal_id_prefix: config.proposal_id_prefix,
+            grace_period_ledgers: if config.grace_period_ledgers > 0 {
+                config.grace_period_ledgers
+            } else {
+                100 // default grace period: 100 ledgers
+            },
+            vote_weight: config.vote_weight,
         };
 
         // Store state
@@ -6948,98 +6954,6 @@ impl VaultDAO {
         Ok(proposal_id)
     }
 
-    pub fn register_pre_hook(env: Env, admin: Address, hook: Address) -> Result<(), VaultError> {
-        admin.require_auth();
-        let role = storage::get_role(&env, &admin);
-        if !Role::role_satisfies(Role::Admin, role) {
-            return Err(VaultError::Unauthorized);
-        }
-    /// Execute a swap proposal (executors only)
-    /// Execute a swap proposal with proper validation and cross-contract invocation
-    /// 
-    /// This function validates:
-    /// - DEX address is in the enabled_dexs whitelist
-    /// - Price impact is within max_price_impact_bps limits using oracle prices
-    /// - Slippage protection via min_amount_out validation
-    /// 
-    /// Supports all SwapProposal variants:
-    /// - Swap: Token-to-token swaps with slippage protection
-    /// - AddLiquidity: Adding liquidity to DEX pools
-    /// - RemoveLiquidity: Removing liquidity from DEX pools  
-    /// - StakeLp: Staking LP tokens in farms
-    /// - UnstakeLp: Unstaking LP tokens from farms
-    /// - ClaimRewards: Claiming farming rewards
-    pub fn execute_swap_proposal(env: Env, executor: Address, proposal_id: u64) -> Result<(), VaultError> {
-        executor.require_auth();
-
-        // Get proposal
-        let mut proposal = storage::get_proposal(&env, proposal_id)?;
-
-        // Validate state
-        if !proposal.is_swap {
-            return Err(VaultError::DexError);
-        }
-        if proposal.status != ProposalStatus::Approved {
-            return Err(VaultError::ProposalNotApproved);
-        }
-        if proposal.status == ProposalStatus::Executed {
-            return Err(VaultError::ProposalAlreadyExecuted);
-        }
-
-        // Check expiration
-        let current_ledger = env.ledger().sequence() as u64;
-        if current_ledger > proposal.expires_at {
-            proposal.status = ProposalStatus::Expired;
-            storage::set_proposal(&env, &proposal);
-            storage::metrics_on_expiry(&env);
-            events::emit_proposal_expired(&env, proposal_id, proposal.expires_at);
-            return Err(VaultError::PermissionExpired);
-        }
-
-        // Check Timelock
-        if proposal.unlock_ledger > 0 && current_ledger < proposal.unlock_ledger {
-            return Err(VaultError::TimelockNotExpired);
-        }
-
-        // Get DEX config and swap details
-        let dex_config = storage::get_dex_config(&env).ok_or(VaultError::DexError)?;
-        let swap_proposal =
-            storage::get_swap_proposal(&env, proposal_id).ok_or(VaultError::DexError)?;
-
-        // Perform the swap with proper validation and cross-contract invocation
-        let swap_result = Self::perform_swap(&env, &dex_config, &swap_proposal, proposal_id)?;
-
-        // Store result
-        storage::set_swap_result(&env, proposal_id, &swap_result);
-
-        // Update proposal status
-        proposal.status = ProposalStatus::Executed;
-        storage::set_proposal(&env, &proposal);
-        storage::extend_instance_ttl(&env);
-
-        // Emit execution event
-        events::emit_proposal_executed(
-            &env,
-            proposal_id,
-            &executor,
-            &env.current_contract_address(),
-            &env.current_contract_address(),
-            0,
-            current_ledger,
-        );
-
-        // Update reputation and metrics
-        Self::update_reputation_on_execution(&env, &proposal);
-        let execution_time = current_ledger.saturating_sub(proposal.created_at);
-        storage::metrics_on_execution(&env, proposal.gas_used, execution_time);
-
-        Ok(())
-    }
-
-    pub fn remove_pre_hook(env: Env, admin: Address, hook: Address) -> Result<(), VaultError> {
-        admin.require_auth();
-        let role = storage::get_role(&env, &admin);
-        if !Role::role_satisfies(Role::Admin, role) {
     /// Execute a swap proposal with comprehensive validation and cross-contract invocation
     /// 
     /// This function implements all requirements:
@@ -8821,7 +8735,8 @@ impl VaultDAO {
         // Per-operation cost: 50,000
         const BASE_OVERHEAD: u64 = 100_000;
         const PER_OP_COST: u64 = 50_000;
-
+        BASE_OVERHEAD + (operations.len() as u64) * PER_OP_COST
+    }
 
     // ========================================================================
     // Time-Weighted Voting

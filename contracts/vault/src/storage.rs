@@ -232,6 +232,10 @@ pub enum FeatureKey {
     MetricsBucketIndex,
     /// Pending config change proposal ID -> u64
     PendingConfig,
+    /// Moderator flag for an address -> bool
+    Moderator(Address),
+    /// Comment rate tracking: (proposal_id, author, day_number) -> u32
+    CommentRateCount(u64, Address, u64),
 }
 
 /// TTL constants (in ledgers, ~5 seconds each)
@@ -2597,4 +2601,70 @@ pub fn remove_delegator_index(env: &Env, delegate: &Address, delegator: &Address
     env.storage()
         .instance()
         .set(&DataKey::DelegatorsFor(delegate.clone()), &updated);
+}
+
+// ============================================================================
+// Moderator Management (Issue #1076)
+// ============================================================================
+
+/// Check if an address has the Moderator sub-role.
+pub fn is_moderator(env: &Env, addr: &Address) -> bool {
+    env.storage()
+        .persistent()
+        .get(&FeatureKey::Moderator(addr.clone()))
+        .unwrap_or(false)
+}
+
+/// Set or remove the Moderator sub-role for an address.
+pub fn set_moderator(env: &Env, addr: &Address, is_mod: bool) {
+    if is_mod {
+        env.storage()
+            .persistent()
+            .set(&FeatureKey::Moderator(addr.clone()), &true);
+        env.storage().persistent().extend_ttl(
+            &FeatureKey::Moderator(addr.clone()),
+            PERSISTENT_TTL_THRESHOLD,
+            PERSISTENT_TTL,
+        );
+    } else {
+        env.storage()
+            .persistent()
+            .remove(&FeatureKey::Moderator(addr.clone()));
+    }
+}
+
+// ============================================================================
+// Comment Rate Limiting (Issue #1076)
+// ============================================================================
+
+/// Get the comment count for a signer on a proposal for a given day.
+pub fn get_comment_rate_count(env: &Env, proposal_id: u64, author: &Address, day: u64) -> u32 {
+    env.storage()
+        .temporary()
+        .get(&FeatureKey::CommentRateCount(proposal_id, author.clone(), day))
+        .unwrap_or(0)
+}
+
+/// Increment the comment count for a signer on a proposal for a given day.
+pub fn increment_comment_rate_count(env: &Env, proposal_id: u64, author: &Address, day: u64) {
+    let key = FeatureKey::CommentRateCount(proposal_id, author.clone(), day);
+    let count: u32 = env.storage().temporary().get(&key).unwrap_or(0);
+    env.storage().temporary().set(&key, &(count + 1));
+    // TTL of 2 days to cover edge cases spanning two ledger epochs
+    env.storage()
+        .temporary()
+        .extend_ttl(&key, DAY_IN_LEDGERS, DAY_IN_LEDGERS * 2);
+}
+
+// ============================================================================
+// Expired Proposal TTL Reduction (Issue #1062)
+// ============================================================================
+
+/// Reduce TTL for an expired proposal to reclaim ledger rent sooner.
+pub fn reduce_expired_proposal_ttl(env: &Env, proposal_id: u64) {
+    let key = DataKey::Proposal(proposal_id);
+    // Set a short TTL (1 day) for expired proposals instead of the default 7 days
+    env.storage()
+        .persistent()
+        .extend_ttl(&key, DAY_IN_LEDGERS / 2, DAY_IN_LEDGERS);
 }
