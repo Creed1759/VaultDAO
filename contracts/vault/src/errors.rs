@@ -1,4 +1,3 @@
-```rust
 //! VaultDAO error definitions.
 
 use soroban_sdk::contracterror;
@@ -90,16 +89,12 @@ pub enum VaultError {
     TemplateValidationFailed = 212,
     /// Invalid time-based threshold configuration
     InvalidThresholdConfig = 310,
-
     /// Delegation cycle detected
     CircularDelegation = 330,
-
     /// Delegation chain exceeds maximum depth
     DelegationChainTooLong = 331,
-
     /// Contract upgrade is not authorized
     UpgradeUnauthorized = 920,
-
     /// Contract upgrade timelock is still active
     UpgradeTimelockActive = 921,
     /// Veto window has closed
@@ -114,20 +109,58 @@ pub enum VaultError {
     RecurringPaymentStopped = 1001,
     /// A config change proposal is already pending
     ConfigChangeInProgress = 1010,
-
-    // =========================================================
-    // Milestone quorum verification errors (NEW)
-    // =========================================================
-
     /// Milestone has already been verified by this address
     AlreadyVerified = 510,
-
     /// Milestone does not have enough verifications to proceed
     InsufficientVerifications = 511,
-
     PermissionExpired = 320,
-    
     PermissionNotFound = 321,
+
+    // =========================================================
+    // Issue #1094: Recipient Whitelist
+    // =========================================================
+
+    /// Whitelist entry has expired
+    WhitelistEntryExpired = 600,
+
+    // =========================================================
+    // Issue #1095: Voting Power Snapshot
+    // =========================================================
+
+    /// Proposal has no signers in snapshot (cannot create)
+    EmptySignerSnapshot = 610,
+
+    // =========================================================
+    // Issue #1096: Multi-Phase Proposals
+    // =========================================================
+
+    /// Proposal exceeds maximum allowed phase count (5)
+    TooManyPhases = 620,
+
+    /// A phase execution failed
+    PhaseExecutionFailed = 621,
+
+    /// Multi-phase proposal not found
+    MultiPhaseProposalNotFound = 622,
+
+    // =========================================================
+    // Issue #1097: Capability Tokens
+    // =========================================================
+
+    /// Capability token not found
+    CapabilityNotFound = 630,
+
+    /// Capability token has expired
+    CapabilityExpired = 631,
+
+    /// Capability token has been revoked
+    CapabilityRevoked = 632,
+
+    /// Capability token max uses reached
+    CapabilityMaxUsesReached = 633,
+
+    /// Requested action not covered by capability
+    CapabilityNotGranted = 634,
 }
 
 // Additional error types that exceed contracterror limits - use generic errors above
@@ -144,4 +177,3 @@ pub enum VaultError {
 
 // Compatibility markers for CI source checks:
 // DelegationError, DelegationChainTooLong, CircularDelegation
-```

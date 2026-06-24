@@ -21,22 +21,23 @@ mod types;
 mod types_balance_snapshot;
 
 use errors::VaultError;
-use soroban_sdk::{contract, contractimpl, Address, Env, IntoVal, Map, String, Symbol, Vec};
+use soroban_sdk::{contract, contractimpl, Address, BytesN, Env, IntoVal, Map, String, Symbol, Vec};
 use types::{
     AuditAction, AuditEntry, BatchExecutionResult, BatchOperation, BatchStatus, BatchTransaction,
-    BridgeConfig, CancellationRecord, Comment, Condition, ConditionLogic, Config,
-    CrossChainAsset, CrossChainProposal, CrossVaultConfig, CrossVaultProposal, CrossVaultStatus,
-    Delegation, DelegationHistory, DexConfig, Dispute, DisputeResolution, DisputeStatus, Escrow,
-    EscrowStatus, ExecutionFeeEstimate, FundingMilestone, FundingMilestoneStatus, FundingRound,
-    FundingRoundConfig, FundingRoundStatus, GasConfig, InitConfig, InsuranceConfig, ListMode,
-    Milestone, NotificationPreferences, OptionalVaultOracleConfig, Priority, Proposal,
-    ProposalAmendment, ProposalStatus, ProposalTemplate, RecoveryConfig, RecoveryProposal,
-    RecoveryStatus, RecurringPayment, Reputation, ReputationConfig, RetryConfig, RetryState, Role,
-    RoleAssignment, ScheduledTransferConfig, StakingConfig, StreamStatus, StreamingPayment,
-    Subscription, SubscriptionStatus, SubscriptionTier, SwapProposal, SwapResult,
-    TemplateOverrides, ThresholdStrategy, TransferDetails, VaultAction, VaultMetrics,
-    VaultOracleConfig, VaultPriceData, VelocityConfig, VotingStrategy,
-    VoteChoice,
+    BridgeConfig, CancellationRecord, Capability, CapabilityToken, Comment, Condition,
+    ConditionLogic, Config, CrossChainAsset, CrossChainProposal, CrossVaultConfig,
+    CrossVaultProposal, CrossVaultStatus, Delegation, DelegationHistory, DexConfig, Dispute,
+    DisputeResolution, DisputeStatus, Escrow, EscrowStatus, ExecutionFeeEstimate, FundingMilestone,
+    FundingMilestoneStatus, FundingRound, FundingRoundConfig, FundingRoundStatus, GasConfig,
+    InitConfig, InsuranceConfig, ListMode, Milestone, MultiPhaseProposal, NotificationPreferences,
+    OptionalProposalOperation, OptionalVaultOracleConfig, Priority, Proposal, ProposalAmendment,
+    ProposalOperation, ProposalPhase, ProposalPhaseStatus, ProposalStatus, ProposalTemplate,
+    RecoveryConfig, RecoveryProposal, RecoveryStatus, RecurringPayment, Reputation,
+    ReputationConfig, RetryConfig, RetryState, Role, RoleAssignment, ScheduledTransferConfig,
+    StakingConfig, StreamStatus, StreamingPayment, Subscription, SubscriptionStatus,
+    SubscriptionTier, SwapProposal, SwapResult, TemplateOverrides, ThresholdStrategy,
+    TransferDetails, VaultAction, VaultMetrics, VaultOracleConfig, VaultPriceData, VelocityConfig,
+    VoteChoice, VotingStrategy, WhitelistEntry,
 };
 
 /// The main contract structure for VaultDAO.
@@ -254,6 +255,7 @@ impl VaultDAO {
             recovery_config: config.recovery_config.clone(),
             staking_config: config.staking_config,
             proposal_id_prefix: config.proposal_id_prefix,
+            whitelist_mode: config.whitelist_mode,
         };
 
         // Store state
@@ -433,6 +435,11 @@ impl VaultDAO {
         // 2. Check initialization and load config (single read — gas optimization)
         let config = storage::get_config(&env)?;
 
+        // 2b. Reject if no signers at creation time (issue #1095)
+        if config.signers.is_empty() {
+            return Err(VaultError::EmptySignerSnapshot);
+        }
+
         // 3. Check permission
         let role = storage::get_role(&env, &proposer);
         if !Role::role_satisfies(Role::Treasurer, role) {
@@ -441,6 +448,8 @@ impl VaultDAO {
 
         // 4. Validate recipient against lists
         Self::validate_recipient(&env, &recipient)?;
+        // 4b. Validate recipient against on-chain whitelist entries (issue #1094)
+        Self::validate_recipient_whitelist_entry(&env, &config, &recipient, amount)?;
 
         // 5. Velocity Limit Check (Sliding Window)
         if !storage::check_and_update_velocity(&env, &proposer, &token_addr, &config.velocity_limit) {
@@ -630,6 +639,7 @@ impl VaultDAO {
                 0
             },
             execution_ledger: 0,
+            signer_snapshot: storage::build_signer_snapshot(&env, &config.signers),
         };
 
         storage::set_proposal(&env, &proposal);
@@ -865,6 +875,7 @@ impl VaultDAO {
                     0
                 },
                 execution_ledger: 0,
+                signer_snapshot: storage::build_signer_snapshot(&env, &config.signers),
             };
 
             storage::set_proposal(&env, &proposal);
@@ -2824,6 +2835,9 @@ impl VaultDAO {
                     reputation_discount_percentage: 0,
                     slash_percentage: 0,
                 },
+                veto_window_ledgers: 0,
+                proposal_id_prefix: 0,
+                whitelist_mode: false,
             }
         });
         (config.quorum, config.quorum_percentage)
@@ -3209,6 +3223,7 @@ impl VaultDAO {
                 0
             },
             execution_ledger: 0,
+            signer_snapshot: storage::build_signer_snapshot(&env, &config.signers),
         };
 
         storage::set_proposal(&env, &proposal);
@@ -3395,6 +3410,7 @@ impl VaultDAO {
                 0
             },
             execution_ledger: 0,
+            signer_snapshot: storage::build_signer_snapshot(&env, &current_config.signers),
         };
 
         storage::set_proposal(&env, &proposal);
@@ -4590,6 +4606,33 @@ impl VaultDAO {
                 }
             }
         }
+    }
+
+    /// Validate recipient against on-chain whitelist entries (issue #1094).
+    /// Only enforced when `config.whitelist_mode` is true.
+    fn validate_recipient_whitelist_entry(
+        env: &Env,
+        config: &Config,
+        recipient: &Address,
+        amount: i128,
+    ) -> Result<(), VaultError> {
+        if !config.whitelist_mode {
+            return Ok(());
+        }
+        let entry = storage::get_whitelist_entry(env, recipient)
+            .ok_or(VaultError::RecipientNotWhitelisted)?;
+        // Check expiry
+        if entry.expiry_ledger > 0 {
+            let current = env.ledger().sequence();
+            if current > entry.expiry_ledger {
+                return Err(VaultError::WhitelistEntryExpired);
+            }
+        }
+        // Check max_amount
+        if entry.max_amount > 0 && amount > entry.max_amount {
+            return Err(VaultError::RecipientNotWhitelisted);
+        }
+        Ok(())
     }
 
     // ========================================================================
@@ -6917,6 +6960,7 @@ impl VaultDAO {
                 0
             },
             execution_ledger: 0,
+            signer_snapshot: storage::build_signer_snapshot(&env, &config.signers),
         };
 
         storage::set_proposal(&env, &proposal);
@@ -6948,461 +6992,6 @@ impl VaultDAO {
         Ok(proposal_id)
     }
 
-    pub fn register_pre_hook(env: Env, admin: Address, hook: Address) -> Result<(), VaultError> {
-        admin.require_auth();
-        let role = storage::get_role(&env, &admin);
-        if !Role::role_satisfies(Role::Admin, role) {
-            return Err(VaultError::Unauthorized);
-        }
-    /// Execute a swap proposal (executors only)
-    /// Execute a swap proposal with proper validation and cross-contract invocation
-    /// 
-    /// This function validates:
-    /// - DEX address is in the enabled_dexs whitelist
-    /// - Price impact is within max_price_impact_bps limits using oracle prices
-    /// - Slippage protection via min_amount_out validation
-    /// 
-    /// Supports all SwapProposal variants:
-    /// - Swap: Token-to-token swaps with slippage protection
-    /// - AddLiquidity: Adding liquidity to DEX pools
-    /// - RemoveLiquidity: Removing liquidity from DEX pools  
-    /// - StakeLp: Staking LP tokens in farms
-    /// - UnstakeLp: Unstaking LP tokens from farms
-    /// - ClaimRewards: Claiming farming rewards
-    pub fn execute_swap_proposal(env: Env, executor: Address, proposal_id: u64) -> Result<(), VaultError> {
-        executor.require_auth();
-
-        // Get proposal
-        let mut proposal = storage::get_proposal(&env, proposal_id)?;
-
-        // Validate state
-        if !proposal.is_swap {
-            return Err(VaultError::DexError);
-        }
-        if proposal.status != ProposalStatus::Approved {
-            return Err(VaultError::ProposalNotApproved);
-        }
-        if proposal.status == ProposalStatus::Executed {
-            return Err(VaultError::ProposalAlreadyExecuted);
-        }
-
-        // Check expiration
-        let current_ledger = env.ledger().sequence() as u64;
-        if current_ledger > proposal.expires_at {
-            proposal.status = ProposalStatus::Expired;
-            storage::set_proposal(&env, &proposal);
-            storage::metrics_on_expiry(&env);
-            events::emit_proposal_expired(&env, proposal_id, proposal.expires_at);
-            return Err(VaultError::PermissionExpired);
-        }
-
-        // Check Timelock
-        if proposal.unlock_ledger > 0 && current_ledger < proposal.unlock_ledger {
-            return Err(VaultError::TimelockNotExpired);
-        }
-
-        // Get DEX config and swap details
-        let dex_config = storage::get_dex_config(&env).ok_or(VaultError::DexError)?;
-        let swap_proposal =
-            storage::get_swap_proposal(&env, proposal_id).ok_or(VaultError::DexError)?;
-
-        // Perform the swap with proper validation and cross-contract invocation
-        let swap_result = Self::perform_swap(&env, &dex_config, &swap_proposal, proposal_id)?;
-
-        // Store result
-        storage::set_swap_result(&env, proposal_id, &swap_result);
-
-        // Update proposal status
-        proposal.status = ProposalStatus::Executed;
-        storage::set_proposal(&env, &proposal);
-        storage::extend_instance_ttl(&env);
-
-        // Emit execution event
-        events::emit_proposal_executed(
-            &env,
-            proposal_id,
-            &executor,
-            &env.current_contract_address(),
-            &env.current_contract_address(),
-            0,
-            current_ledger,
-        );
-
-        // Update reputation and metrics
-        Self::update_reputation_on_execution(&env, &proposal);
-        let execution_time = current_ledger.saturating_sub(proposal.created_at);
-        storage::metrics_on_execution(&env, proposal.gas_used, execution_time);
-
-        Ok(())
-    }
-
-    pub fn remove_pre_hook(env: Env, admin: Address, hook: Address) -> Result<(), VaultError> {
-        admin.require_auth();
-        let role = storage::get_role(&env, &admin);
-        if !Role::role_satisfies(Role::Admin, role) {
-    /// Execute a swap proposal with comprehensive validation and cross-contract invocation
-    /// 
-    /// This function implements all requirements:
-    /// - Validates DEX whitelist enforcement
-    /// - Uses pre-execution oracle prices for price impact validation
-    /// - Handles all SwapProposal variants
-    /// - Stores SwapResult under FeatureKey::SwapResult(proposal_id)
-    /// - Emits appropriate events for each operation type
-    pub fn execute_swap_proposal(env: Env, executor: Address, proposal_id: u64) -> Result<(), VaultError> {
-        executor.require_auth();
-
-        // Get proposal
-        let mut proposal = storage::get_proposal(&env, proposal_id)?;
-
-        // Validate state
-        if !proposal.is_swap {
-            return Err(VaultError::DexError);
-        }
-        if proposal.status != ProposalStatus::Approved {
-            return Err(VaultError::ProposalNotApproved);
-        }
-        if proposal.status == ProposalStatus::Executed {
-            return Err(VaultError::ProposalAlreadyExecuted);
-        }
-
-        // Check expiration
-        let current_ledger = env.ledger().sequence() as u64;
-        if current_ledger > proposal.expires_at {
-            proposal.status = ProposalStatus::Expired;
-            storage::set_proposal(&env, &proposal);
-            storage::metrics_on_expiry(&env);
-            events::emit_proposal_expired(&env, proposal_id, proposal.expires_at);
-            return Err(VaultError::ProposalExpired);
-        }
-
-        // Check Timelock
-        if proposal.unlock_ledger > 0 && current_ledger < proposal.unlock_ledger {
-            return Err(VaultError::TimelockNotExpired);
-        }
-
-        // Get DEX config and swap details
-        let dex_config = storage::get_dex_config(&env).ok_or(VaultError::DexError)?;
-        let swap_proposal = storage::get_swap_proposal(&env, proposal_id).ok_or(VaultError::DexError)?;
-
-        // Perform comprehensive swap validation and execution
-        let swap_result = Self::perform_comprehensive_swap(&env, &dex_config, &swap_proposal, proposal_id)?;
-
-        // Store result under FeatureKey::SwapResult(proposal_id)
-        storage::set_swap_result(&env, proposal_id, &swap_result);
-
-        // Update proposal status
-        proposal.status = ProposalStatus::Executed;
-        storage::set_proposal(&env, &proposal);
-        storage::extend_instance_ttl(&env);
-
-        // Emit execution event
-        events::emit_proposal_executed(
-            &env,
-            proposal_id,
-            &executor,
-            &env.current_contract_address(),
-            &env.current_contract_address(),
-            0,
-            current_ledger,
-        );
-
-        // Update reputation and metrics
-        Self::update_reputation_on_execution(&env, &proposal);
-        let execution_time = current_ledger.saturating_sub(proposal.created_at);
-        storage::metrics_on_execution(&env, proposal.gas_used, execution_time);
-
-        Ok(())
-    }
-
-    /// Perform comprehensive swap validation and execution for all SwapProposal variants
-    /// 
-    /// This function:
-    /// - Enforces DexConfig::enabled_dexs whitelist
-    /// - Uses pre-execution oracle prices for price impact validation
-    /// - Validates price_impact_bps <= dex_config.max_price_impact_bps
-    /// - Validates amount_out >= min_amount_out after execution
-    /// - Handles all SwapProposal variants with appropriate events
-    fn perform_comprehensive_swap(
-        env: &Env,
-        dex_config: &DexConfig,
-        swap_proposal: &SwapProposal,
-        proposal_id: u64,
-    ) -> Result<SwapResult, VaultError> {
-        match swap_proposal {
-            SwapProposal::Swap(dex, token_in, token_out, amount_in, min_amount_out) => {
-                // Enforce DEX whitelist - unknown DEX address returns VaultError::DexError
-                if !dex_config.enabled_dexs.contains(dex) {
-                    return Err(VaultError::DexError);
-                }
-
-                // Get pre-execution oracle prices for price impact calculation
-                let price_in = Self::get_asset_price(env, token_in.clone())?;
-                let price_out = Self::get_asset_price(env, token_out.clone())?;
-                
-                // Calculate expected amount out based on oracle prices
-                let expected_amount_out = (*amount_in * price_in) / price_out;
-                
-                // TODO: Replace with actual DEX contract cross-contract invocation
-                // For now, simulate the swap with realistic behavior
-                let simulated_amount_out = *amount_in * 99 / 100; // 1% slippage simulation
-                
-                // Calculate actual price impact using pre-execution oracle price
-                let price_impact_bps = if expected_amount_out > 0 {
-                    let impact = ((expected_amount_out - simulated_amount_out) * 10000) / expected_amount_out;
-                    impact.max(0) as u32
-                } else {
-                    0
-                };
-
-                // Before execution: validate price_impact_bps <= dex_config.max_price_impact_bps
-                if price_impact_bps > dex_config.max_price_impact_bps {
-                    return Err(VaultError::DexError);
-                }
-
-                // After execution: validate amount_out >= min_amount_out; revert with VaultError::DexError if not
-                if simulated_amount_out < *min_amount_out {
-                    return Err(VaultError::DexError);
-                }
-
-                // Emit swap-specific event
-                events::emit_swap_executed(env, proposal_id, dex, token_in, token_out, *amount_in, simulated_amount_out);
-
-                Ok(SwapResult {
-                    amount_in: *amount_in,
-                    amount_out: simulated_amount_out,
-                    price_impact_bps,
-                    executed_at: env.ledger().sequence() as u64,
-                })
-            }
-            SwapProposal::AddLiquidity(dex, token_a, token_b, amount_a, amount_b, min_lp_tokens) => {
-                // Enforce DEX whitelist
-                if !dex_config.enabled_dexs.contains(dex) {
-                    return Err(VaultError::DexError);
-                }
-
-                // TODO: Replace with actual DEX contract call for adding liquidity
-                let simulated_lp_tokens = (*amount_a + *amount_b) / 2; // Simplified calculation
-                
-                if simulated_lp_tokens < *min_lp_tokens {
-                    return Err(VaultError::DexError);
-                }
-
-                // Emit liquidity addition event
-                events::emit_liquidity_added(env, proposal_id, dex, token_a, token_b, *amount_a, *amount_b, simulated_lp_tokens);
-
-                Ok(SwapResult {
-                    amount_in: *amount_a + *amount_b,
-                    amount_out: simulated_lp_tokens,
-                    price_impact_bps: 50, // Minimal price impact for liquidity provision
-                    executed_at: env.ledger().sequence() as u64,
-                })
-            }
-            SwapProposal::RemoveLiquidity(dex, _lp_token, amount, min_token_a, min_token_b) => {
-                // Enforce DEX whitelist
-                if !dex_config.enabled_dexs.contains(dex) {
-                    return Err(VaultError::DexError);
-                }
-
-                // TODO: Replace with actual DEX contract call for removing liquidity
-                let simulated_token_a = *amount / 2;
-                let simulated_token_b = *amount / 2;
-                
-                if simulated_token_a < *min_token_a || simulated_token_b < *min_token_b {
-                    return Err(VaultError::DexError);
-                }
-
-                // Emit liquidity removal event
-                events::emit_liquidity_removed(env, proposal_id, dex, *amount);
-
-                Ok(SwapResult {
-                    amount_in: *amount,
-                    amount_out: simulated_token_a + simulated_token_b,
-                    price_impact_bps: 25, // Minimal price impact for liquidity removal
-                    executed_at: env.ledger().sequence() as u64,
-                })
-            }
-            SwapProposal::StakeLp(farm, _lp_token, amount) => {
-                // Note: For staking, we don't check DEX whitelist but could add farm whitelist
-                // TODO: Replace with actual farm contract call for staking LP tokens
-                
-                // Emit LP staking event
-                events::emit_lp_staked(env, proposal_id, farm, *amount);
-
-                Ok(SwapResult {
-                    amount_in: *amount,
-                    amount_out: *amount, // Staking doesn't change token amount
-                    price_impact_bps: 0, // No price impact for staking
-                    executed_at: env.ledger().sequence() as u64,
-                })
-            }
-            SwapProposal::UnstakeLp(farm, _lp_token, amount) => {
-                // TODO: Replace with actual farm contract call for unstaking LP tokens
-                
-                // Emit LP unstaking event
-                events::emit_lp_unstaked(env, proposal_id, farm, *amount);
-
-                Ok(SwapResult {
-                    amount_in: *amount,
-                    amount_out: *amount, // Unstaking doesn't change token amount
-                    price_impact_bps: 0, // No price impact for unstaking
-                    executed_at: env.ledger().sequence() as u64,
-                })
-            }
-            SwapProposal::ClaimRewards(farm) => {
-                // TODO: Replace with actual farm contract call for claiming rewards
-                let simulated_rewards = 100; // Mock reward amount
-                
-                // Emit rewards claiming event
-                events::emit_rewards_claimed(env, proposal_id, farm, simulated_rewards);
-
-                Ok(SwapResult {
-                    amount_in: 0, // No input for claiming rewards
-                    amount_out: simulated_rewards,
-                    price_impact_bps: 0, // No price impact for claiming rewards
-                    executed_at: env.ledger().sequence() as u64,
-                })
-            }
-        }
-    }
-
-    /// Perform the actual swap operation (mock implementation)
-    fn perform_swap(
-        env: &Env,
-        dex_config: &DexConfig,
-        swap_proposal: &SwapProposal,
-        proposal_id: u64,
-    ) -> Result<SwapResult, VaultError> {
-        match swap_proposal {
-            SwapProposal::Swap(dex, token_in, token_out, amount_in, min_amount_out) => {
-                // Enforce DEX whitelist
-                if !dex_config.enabled_dexs.contains(dex) {
-                    return Err(VaultError::DexError);
-                }
-
-                // Get pre-execution oracle prices for price impact calculation
-                let price_in = Self::get_asset_price(env, token_in.clone())?;
-                let price_out = Self::get_asset_price(env, token_out.clone())?;
-                
-                // Calculate expected amount out based on oracle prices
-                let expected_amount_out = (*amount_in * price_in) / price_out;
-                
-                // TODO: Replace with actual DEX contract call
-                // For now, simulate the swap with realistic slippage
-                let simulated_amount_out = *amount_in * 99 / 100; // 1% slippage simulation
-                
-                // Calculate actual price impact
-                let price_impact_bps = if expected_amount_out > 0 {
-                    let impact = ((expected_amount_out - simulated_amount_out) * 10000) / expected_amount_out;
-                    impact.max(0) as u32
-                } else {
-                    0
-                };
-
-                // Validate price impact against config
-                if price_impact_bps > dex_config.max_price_impact_bps {
-                    return Err(VaultError::DexError);
-                }
-
-                // Validate slippage protection
-                if simulated_amount_out < *min_amount_out {
-                    return Err(VaultError::DexError);
-                }
-
-                // Emit swap-specific event
-                events::emit_swap_executed(env, proposal_id, dex, token_in, token_out, *amount_in, simulated_amount_out);
-
-                Ok(SwapResult {
-                    amount_in: *amount_in,
-                    amount_out: simulated_amount_out,
-                    price_impact_bps,
-                    executed_at: env.ledger().sequence() as u64,
-                })
-            }
-            SwapProposal::AddLiquidity(dex, token_a, token_b, amount_a, amount_b, min_lp_tokens) => {
-                // Enforce DEX whitelist
-                if !dex_config.enabled_dexs.contains(dex) {
-                    return Err(VaultError::DexError);
-                }
-
-                // TODO: Replace with actual DEX contract call for adding liquidity
-                let simulated_lp_tokens = (*amount_a + *amount_b) / 2; // Simplified calculation
-                
-                if simulated_lp_tokens < *min_lp_tokens {
-                    return Err(VaultError::DexError);
-                }
-
-                events::emit_liquidity_added(env, proposal_id, dex, token_a, token_b, *amount_a, *amount_b, simulated_lp_tokens);
-
-                Ok(SwapResult {
-                    amount_in: *amount_a + *amount_b,
-                    amount_out: simulated_lp_tokens,
-                    price_impact_bps: 50, // Minimal price impact for liquidity provision
-                    executed_at: env.ledger().sequence() as u64,
-                })
-            }
-            SwapProposal::RemoveLiquidity(dex, lp_token, amount, min_token_a, min_token_b) => {
-                // Enforce DEX whitelist
-                if !dex_config.enabled_dexs.contains(dex) {
-                    return Err(VaultError::DexError);
-                }
-
-                // TODO: Replace with actual DEX contract call for removing liquidity
-                let simulated_token_a = *amount / 2;
-                let simulated_token_b = *amount / 2;
-                
-                if simulated_token_a < *min_token_a || simulated_token_b < *min_token_b {
-                    return Err(VaultError::DexError);
-                }
-
-                events::emit_liquidity_removed(env, proposal_id, dex, *amount);
-
-                Ok(SwapResult {
-                    amount_in: *amount,
-                    amount_out: simulated_token_a + simulated_token_b,
-                    price_impact_bps: 25, // Minimal price impact for liquidity removal
-                    executed_at: env.ledger().sequence() as u64,
-                })
-            }
-            SwapProposal::StakeLp(farm, lp_token, amount) => {
-                // Note: For staking, we don't check DEX whitelist but could add farm whitelist
-                // TODO: Replace with actual farm contract call for staking LP tokens
-                
-                events::emit_lp_staked(env, proposal_id, farm, *amount);
-
-                Ok(SwapResult {
-                    amount_in: *amount,
-                    amount_out: *amount, // Staking doesn't change token amount
-                    price_impact_bps: 0, // No price impact for staking
-                    executed_at: env.ledger().sequence() as u64,
-                })
-            }
-            SwapProposal::UnstakeLp(farm, lp_token, amount) => {
-                // TODO: Replace with actual farm contract call for unstaking LP tokens
-                
-                events::emit_lp_unstaked(env, proposal_id, farm, *amount);
-
-                Ok(SwapResult {
-                    amount_in: *amount,
-                    amount_out: *amount, // Unstaking doesn't change token amount
-                    price_impact_bps: 0, // No price impact for unstaking
-                    executed_at: env.ledger().sequence() as u64,
-                })
-            }
-            SwapProposal::ClaimRewards(farm) => {
-                // TODO: Replace with actual farm contract call for claiming rewards
-                let simulated_rewards = 100; // Mock reward amount
-                
-                events::emit_rewards_claimed(env, proposal_id, farm, simulated_rewards);
-
-                Ok(SwapResult {
-                    amount_in: 0, // No input for claiming rewards
-                    amount_out: simulated_rewards,
-                    price_impact_bps: 0, // No price impact for claiming rewards
-                    executed_at: env.ledger().sequence() as u64,
-                })
-            }
-        }
-    }
 
     pub fn register_pre_hook(env: Env, admin: Address, hook: Address) -> Result<(), VaultError> {
         admin.require_auth();
@@ -8163,6 +7752,7 @@ impl VaultDAO {
             is_swap: false,
             voting_deadline: 0,
             execution_ledger: 0,
+            signer_snapshot: storage::build_signer_snapshot(&env, &config.signers),
         };
 
         storage::set_proposal(&env, &proposal);
@@ -8821,7 +8411,8 @@ impl VaultDAO {
         // Per-operation cost: 50,000
         const BASE_OVERHEAD: u64 = 100_000;
         const PER_OP_COST: u64 = 50_000;
-
+        BASE_OVERHEAD + (operations.len() as u64) * PER_OP_COST
+    }
 
     // ========================================================================
     // Time-Weighted Voting
@@ -10402,6 +9993,7 @@ impl VaultDAO {
                 0
             },
             execution_ledger: 0,
+            signer_snapshot: storage::build_signer_snapshot(&env, &config.signers),
         };
 
         storage::set_proposal(&env, &proposal);
@@ -11149,6 +10741,7 @@ impl VaultDAO {
                 0
             },
             execution_ledger: 0,
+            signer_snapshot: storage::build_signer_snapshot(&env, &config.signers),
         };
 
         storage::set_proposal(&env, &proposal);
@@ -11404,6 +10997,7 @@ impl VaultDAO {
             is_swap: false,
             voting_deadline: 0,
             execution_ledger: 0,
+            signer_snapshot: storage::build_signer_snapshot(&env, &config.signers),
         };
 
         storage::set_proposal(&env, &proposal);
@@ -11619,6 +11213,7 @@ impl VaultDAO {
                 0
             },
             execution_ledger: 0,
+            signer_snapshot: storage::build_signer_snapshot(&env, &config.signers),
         };
 
         storage::set_proposal(&env, &new_proposal);
@@ -11643,5 +11238,328 @@ impl VaultDAO {
         Self::update_reputation_on_propose(&env, &proposer);
 
         Ok(new_proposal_id)
+    }
+
+    // ========================================================================
+    // Issue #1094: On-Chain Recipient Whitelist Management
+    // ========================================================================
+
+    /// Add an address to the on-chain whitelist with M-of-N approval metadata.
+    /// Only Admin can call this.
+    pub fn add_whitelist_entry(
+        env: Env,
+        admin: Address,
+        recipient: Address,
+        entry: WhitelistEntry,
+    ) -> Result<(), VaultError> {
+        admin.require_auth();
+        let role = storage::get_role(&env, &admin);
+        if !Role::role_satisfies(Role::Admin, role) {
+            return Err(VaultError::InsufficientRole);
+        }
+        // Require M-of-N: approved_by must have >= threshold approvals
+        let config = storage::get_config(&env)?;
+        let mut count = 0u32;
+        for i in 0..entry.approved_by.len() {
+            if let Some(addr) = entry.approved_by.get(i) {
+                if config.signers.contains(&addr) {
+                    count += 1;
+                }
+            }
+        }
+        if count < config.threshold {
+            return Err(VaultError::Unauthorized);
+        }
+        storage::set_whitelist_entry(&env, &recipient, &entry);
+        storage::extend_instance_ttl(&env);
+        Ok(())
+    }
+
+    /// Remove an address from the on-chain whitelist. Only Admin can call this.
+    pub fn remove_whitelist_entry(
+        env: Env,
+        admin: Address,
+        recipient: Address,
+    ) -> Result<(), VaultError> {
+        admin.require_auth();
+        let role = storage::get_role(&env, &admin);
+        if !Role::role_satisfies(Role::Admin, role) {
+            return Err(VaultError::InsufficientRole);
+        }
+        if !storage::has_whitelist_entry(&env, &recipient) {
+            return Err(VaultError::AddressNotOnList);
+        }
+        storage::remove_whitelist_entry(&env, &recipient);
+        Ok(())
+    }
+
+    /// Get a whitelist entry for a recipient address.
+    pub fn get_whitelist_entry(env: Env, recipient: Address) -> Option<WhitelistEntry> {
+        storage::get_whitelist_entry(&env, &recipient)
+    }
+
+    /// Toggle whitelist mode on/off. Only Admin can call this.
+    pub fn set_whitelist_mode(env: Env, admin: Address, enabled: bool) -> Result<(), VaultError> {
+        admin.require_auth();
+        let role = storage::get_role(&env, &admin);
+        if !Role::role_satisfies(Role::Admin, role) {
+            return Err(VaultError::InsufficientRole);
+        }
+        let mut config = storage::get_config(&env)?;
+        config.whitelist_mode = enabled;
+        storage::set_config(&env, &config);
+        storage::extend_instance_ttl(&env);
+        Ok(())
+    }
+
+    // ========================================================================
+    // Issue #1096: Multi-Phase Proposal Execution
+    // ========================================================================
+
+    /// Create a multi-phase proposal. The base proposal must already be approved.
+    /// Max 5 phases. Each phase has an operation and optional rollback operation.
+    pub fn create_multi_phase_proposal(
+        env: Env,
+        proposer: Address,
+        phases: Vec<ProposalPhase>,
+    ) -> Result<u64, VaultError> {
+        proposer.require_auth();
+        let role = storage::get_role(&env, &proposer);
+        if !Role::role_satisfies(Role::Treasurer, role) {
+            return Err(VaultError::InsufficientRole);
+        }
+        if phases.len() == 0 || phases.len() > 5 {
+            return Err(VaultError::TooManyPhases);
+        }
+        let config = storage::get_config(&env)?;
+        if config.signers.is_empty() {
+            return Err(VaultError::EmptySignerSnapshot);
+        }
+
+        // Create a base proposal (placeholder transfer to contract itself)
+        let current_ledger = env.ledger().sequence() as u64;
+        let proposal_id = storage::increment_proposal_id(&env);
+        let new_proposal = Proposal {
+            id: proposal_id,
+            proposer: proposer.clone(),
+            recipient: env.current_contract_address(),
+            token: env.current_contract_address(),
+            amount: 0,
+            memo: Symbol::new(&env, "multi_phase"),
+            metadata: Map::new(&env),
+            tags: Vec::new(&env),
+            approvals: Vec::new(&env),
+            abstentions: Vec::new(&env),
+            attachments: Vec::new(&env),
+            status: ProposalStatus::Pending,
+            priority: Priority::Normal,
+            conditions: Vec::new(&env),
+            condition_logic: ConditionLogic::None,
+            created_at: current_ledger,
+            expires_at: current_ledger + 17_280 * 7,
+            unlock_ledger: 0,
+            execution_time: None,
+            execution_window_ledgers: 0,
+            insurance_amount: 0,
+            stake_amount: 0,
+            gas_limit: 0,
+            gas_used: 0,
+            snapshot_ledger: current_ledger,
+            snapshot_signers: config.signers.clone(),
+            depends_on: Vec::new(&env),
+            is_swap: false,
+            voting_deadline: 0,
+            execution_ledger: 0,
+            signer_snapshot: storage::build_signer_snapshot(&env, &config.signers),
+        };
+        storage::set_proposal(&env, &new_proposal);
+
+        let mp = MultiPhaseProposal {
+            proposal_id,
+            phases,
+            last_executed_phase: -1,
+        };
+        storage::set_multi_phase_proposal(&env, &mp);
+        storage::extend_instance_ttl(&env);
+
+        Ok(proposal_id)
+    }
+
+    /// Execute a multi-phase proposal. Phases run in order; on failure, rollbacks execute.
+    /// The base proposal must be in Approved status.
+    pub fn execute_multi_phase_proposal(
+        env: Env,
+        executor: Address,
+        proposal_id: u64,
+    ) -> Result<(), VaultError> {
+        executor.require_auth();
+        let role = storage::get_role(&env, &executor);
+        if !Role::role_satisfies(Role::Treasurer, role) {
+            return Err(VaultError::InsufficientRole);
+        }
+
+        let mut base = storage::get_proposal(&env, proposal_id)?;
+        if base.status != ProposalStatus::Approved {
+            return Err(VaultError::ProposalNotApproved);
+        }
+
+        let mut mp = storage::get_multi_phase_proposal(&env, proposal_id)
+            .ok_or(VaultError::MultiPhaseProposalNotFound)?;
+
+        let mut failed_at: Option<u32> = None;
+
+        // Execute phases in order
+        for i in 0..mp.phases.len() {
+            let mut phase = mp.phases.get(i).unwrap();
+            let result = Self::execute_phase_operation(&env, &phase.operation);
+            if result.is_ok() {
+                phase.status = ProposalPhaseStatus::Executed;
+                mp.last_executed_phase = i as i32;
+            } else {
+                phase.status = ProposalPhaseStatus::Failed;
+                failed_at = Some(i);
+                mp.phases.set(i, phase);
+                break;
+            }
+            mp.phases.set(i, phase);
+        }
+
+        // If a phase failed, run rollbacks in reverse order
+        if let Some(fail_idx) = failed_at {
+            let rollback_end = if fail_idx == 0 { 0 } else { fail_idx };
+            let mut rb = if rollback_end > 0 { rollback_end - 1 } else { 0 };
+            loop {
+                let mut phase = mp.phases.get(rb).unwrap();
+                if phase.status == ProposalPhaseStatus::Executed {
+                    let rb_result = match &phase.rollback_operation {
+                        OptionalProposalOperation::Some(op) => {
+                            Self::execute_phase_operation(&env, op)
+                        }
+                        OptionalProposalOperation::None => Ok(()),
+                    };
+                    if rb_result.is_ok() {
+                        phase.status = ProposalPhaseStatus::RolledBack;
+                    }
+                    mp.phases.set(rb, phase);
+                }
+                if rb == 0 { break; }
+                rb -= 1;
+            }
+            base.status = ProposalStatus::Rejected;
+            storage::set_proposal(&env, &base);
+            storage::set_multi_phase_proposal(&env, &mp);
+            return Err(VaultError::PhaseExecutionFailed);
+        }
+
+        base.status = ProposalStatus::Executed;
+        base.execution_ledger = env.ledger().sequence() as u64;
+        storage::set_proposal(&env, &base);
+        storage::set_multi_phase_proposal(&env, &mp);
+        Ok(())
+    }
+
+    /// Execute a single ProposalOperation for multi-phase proposals
+    fn execute_phase_operation(env: &Env, op: &ProposalOperation) -> Result<(), VaultError> {
+        match op {
+            ProposalOperation::Transfer(recipient, tok, amount, _memo) => {
+                token::try_transfer(env, tok, recipient, *amount)
+                    .map_err(|_| VaultError::PhaseExecutionFailed)
+            }
+        }
+    }
+
+    // ========================================================================
+    // Issue #1097: Cross-Contract Capability Tokens
+    // ========================================================================
+
+    /// Grant a capability token to an address. Only Admin can call this.
+    pub fn grant_capability(
+        env: Env,
+        admin: Address,
+        token: CapabilityToken,
+    ) -> Result<(), VaultError> {
+        admin.require_auth();
+        let role = storage::get_role(&env, &admin);
+        if !Role::role_satisfies(Role::Admin, role) {
+            return Err(VaultError::InsufficientRole);
+        }
+        storage::set_capability_token(&env, &token);
+        storage::extend_instance_ttl(&env);
+        Ok(())
+    }
+
+    /// Use a capability token. The caller must be the token's `granted_to` address.
+    /// Verifies validity, enforces scoped amount limits, and decrements use count.
+    pub fn use_capability(
+        env: Env,
+        caller: Address,
+        token_id: BytesN<32>,
+        action: Capability,
+    ) -> Result<(), VaultError> {
+        caller.require_auth();
+        let mut token = storage::get_capability_token(&env, &token_id)
+            .ok_or(VaultError::CapabilityNotFound)?;
+
+        if token.revoked {
+            return Err(VaultError::CapabilityRevoked);
+        }
+        if token.granted_to != caller {
+            return Err(VaultError::Unauthorized);
+        }
+
+        let current_ledger = env.ledger().sequence();
+        if token.expires_at > 0 && current_ledger > token.expires_at {
+            return Err(VaultError::CapabilityExpired);
+        }
+        if token.max_uses > 0 && token.uses_count >= token.max_uses {
+            return Err(VaultError::CapabilityMaxUsesReached);
+        }
+
+        // Check that the action is covered by this token
+        let mut covered = false;
+        for i in 0..token.capabilities.len() {
+            if let Some(cap) = token.capabilities.get(i) {
+                let matches = match (&cap, &action) {
+                    (Capability::InitiateStream(max), Capability::InitiateStream(req)) => req <= max,
+                    (Capability::CreateProposal(max), Capability::CreateProposal(req)) => req <= max,
+                    (Capability::ExecuteRecurring(id1), Capability::ExecuteRecurring(id2)) => id1 == id2,
+                    _ => false,
+                };
+                if matches {
+                    covered = true;
+                    break;
+                }
+            }
+        }
+        if !covered {
+            return Err(VaultError::CapabilityNotGranted);
+        }
+
+        token.uses_count += 1;
+        storage::set_capability_token(&env, &token);
+        Ok(())
+    }
+
+    /// Revoke a capability token. Only Admin can call this.
+    pub fn revoke_capability(
+        env: Env,
+        admin: Address,
+        token_id: BytesN<32>,
+    ) -> Result<(), VaultError> {
+        admin.require_auth();
+        let role = storage::get_role(&env, &admin);
+        if !Role::role_satisfies(Role::Admin, role) {
+            return Err(VaultError::InsufficientRole);
+        }
+        let mut token = storage::get_capability_token(&env, &token_id)
+            .ok_or(VaultError::CapabilityNotFound)?;
+        token.revoked = true;
+        storage::set_capability_token(&env, &token);
+        Ok(())
+    }
+
+    /// Get a capability token by ID.
+    pub fn get_capability(env: Env, token_id: BytesN<32>) -> Option<CapabilityToken> {
+        storage::get_capability_token(&env, &token_id)
     }
 }
