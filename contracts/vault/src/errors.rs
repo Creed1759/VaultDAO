@@ -1,4 +1,3 @@
-```rust
 //! VaultDAO error definitions.
 
 use soroban_sdk::contracterror;
@@ -128,6 +127,21 @@ pub enum VaultError {
     PermissionExpired = 320,
     
     PermissionNotFound = 321,
+
+    /// Vault is paused — all write operations are blocked
+    VaultPaused = 600,
+
+    /// Caller is not an authorized emergency signer
+    NotEmergencySigner = 601,
+
+    /// Vault is not paused
+    VaultNotPaused = 602,
+
+    /// Duplicate proposal detected (same content fingerprint)
+    DuplicateProposal = 610,
+
+    /// Invalid proposal ID prefix
+    InvalidProposalIdPrefix = 620,
 }
 
 // Additional error types that exceed contracterror limits - use generic errors above
@@ -144,4 +158,3 @@ pub enum VaultError {
 
 // Compatibility markers for CI source checks:
 // DelegationError, DelegationChainTooLong, CircularDelegation
-```

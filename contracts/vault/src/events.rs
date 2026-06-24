@@ -1218,3 +1218,27 @@ pub fn emit_metrics_bucket_updated(
         (executed, rejected, expired),
     );
 }
+
+/// Emit when vault is paused
+pub fn emit_vault_paused(env: &Env, paused_by: &Address, cause: &soroban_sdk::Symbol) {
+    env.events().publish(
+        (Symbol::new(env, "vault_paused"),),
+        (paused_by.clone(), cause.clone()),
+    );
+}
+
+/// Emit when vault is unpaused
+pub fn emit_vault_unpaused(env: &Env, unpaused_by: &Address) {
+    env.events().publish(
+        (Symbol::new(env, "vault_unpaused"),),
+        unpaused_by.clone(),
+    );
+}
+
+/// Emit compliance auto-report event
+pub fn emit_compliance_report(env: &Env, score: u32, generated_at: u32) {
+    env.events().publish(
+        (Symbol::new(env, "compliance_report"),),
+        (score, generated_at),
+    );
+}

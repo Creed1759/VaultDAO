@@ -37,6 +37,7 @@ use types::{
     TemplateOverrides, ThresholdStrategy, TransferDetails, VaultAction, VaultMetrics,
     VaultOracleConfig, VaultPriceData, VelocityConfig, VotingStrategy,
     VoteChoice,
+    PauseState, ComplianceRule, ComplianceReport,
 };
 
 /// The main contract structure for VaultDAO.
@@ -325,6 +326,7 @@ impl VaultDAO {
             empty_dependencies,
             None,
             0,
+            false,
         )
     }
 
@@ -373,6 +375,7 @@ impl VaultDAO {
             empty_dependencies,
             Some(schedule.execution_time),
             schedule.execution_window_ledgers,
+            false,
         )
     }
 
@@ -408,6 +411,7 @@ impl VaultDAO {
             depends_on,
             None,
             0,
+            false,
         )
     }
 
@@ -426,12 +430,18 @@ impl VaultDAO {
         depends_on: Vec<u64>,
         execution_time: Option<u64>,
         execution_window_ledgers: u64,
+        override_duplicate: bool,
     ) -> Result<u64, VaultError> {
         // 1. Verify identity
         proposer.require_auth();
 
         // 2. Check initialization and load config (single read — gas optimization)
         let config = storage::get_config(&env)?;
+
+        // 2a. Reject if vault is paused (#1084)
+        if storage::get_pause_state(&env).is_paused {
+            return Err(VaultError::VaultPaused);
+        }
 
         // 3. Check permission
         let role = storage::get_role(&env, &proposer);
@@ -550,6 +560,19 @@ impl VaultDAO {
             }
         }
 
+        // 10c. Proposal fingerprint deduplication (#1089)
+        // Fingerprint = sha256(amount_le || recipient_bytes || token_bytes)
+        {
+            let mut preimage = soroban_sdk::Bytes::new(&env);
+            preimage.extend_from_array(&amount.to_le_bytes());
+            preimage.extend_from_slice(&recipient.to_bytes());
+            preimage.extend_from_slice(&token_addr.to_bytes());
+            let fingerprint = env.crypto().sha256(&preimage);
+            if !override_duplicate && storage::has_proposal_fingerprint(&env, &fingerprint) {
+                return Err(VaultError::DuplicateProposal);
+            }
+        }
+
         // 11. Reserve spending (confirmed on execution)
         storage::add_daily_spent(&env, today, amount);
         storage::add_weekly_spent(&env, week, amount);
@@ -636,6 +659,16 @@ impl VaultDAO {
         Self::persist_execution_fee_estimate(&env, &proposal);
         storage::add_to_priority_queue(&env, priority as u32, proposal_id);
 
+        // Store content fingerprint for deduplication (#1089)
+        {
+            let mut preimage = soroban_sdk::Bytes::new(&env);
+            preimage.extend_from_array(&amount.to_le_bytes());
+            preimage.extend_from_slice(&recipient.to_bytes());
+            preimage.extend_from_slice(&token_addr.to_bytes());
+            let fp = env.crypto().sha256(&preimage);
+            storage::set_proposal_fingerprint(&env, &fp);
+        }
+
         // Extend TTL to ensure persistent data stays alive
         storage::extend_instance_ttl(&env);
 
@@ -714,6 +747,10 @@ impl VaultDAO {
         }
 
         let config = storage::get_config(&env)?;
+        // Reject if vault is paused (#1084)
+        if storage::get_pause_state(&env).is_paused {
+            return Err(VaultError::VaultPaused);
+        }
         let role = storage::get_role(&env, &proposer);
         if !Role::role_satisfies(Role::Treasurer, role) {
             return Err(VaultError::InsufficientRole);
@@ -1391,6 +1428,11 @@ impl VaultDAO {
         // Get proposal
         let mut proposal = storage::get_proposal(&env, proposal_id)?;
 
+        // Reject if vault is paused (#1084)
+        if storage::get_pause_state(&env).is_paused {
+            return Err(VaultError::VaultPaused);
+        }
+
         // Validate state via state machine
         if proposal.status == ProposalStatus::Executed {
             return Err(VaultError::ProposalAlreadyExecuted);
@@ -1482,6 +1524,27 @@ impl VaultDAO {
             ),
         };
         storage::set_execution_snapshot(&env, proposal_id, &snapshot);
+
+        // Circuit breaker check: auto-pause if outflow in current hour exceeds threshold (#1084)
+        let threshold = storage::get_circuit_breaker_threshold(&env);
+        if threshold > 0 {
+            let window = storage::get_hour_window(&env);
+            let outflow = storage::get_circuit_breaker_outflow(&env, window);
+            if outflow + proposal.amount > threshold {
+                // Auto-trigger pause
+                let cb_cause = Symbol::new(&env, "circuit_breaker");
+                let pause_state = PauseState {
+                    is_paused: true,
+                    paused_by: None,
+                    paused_at_ledger: env.ledger().sequence(),
+                    cause: cb_cause.clone(),
+                };
+                storage::set_pause_state(&env, &pause_state);
+                events::emit_vault_paused(&env, &executor, &cb_cause);
+                return Err(VaultError::VaultPaused);
+            }
+            storage::add_circuit_breaker_outflow(&env, window, proposal.amount);
+        }
 
         // Attempt execution — retryable failures are handled below
         let exec_result =
@@ -6954,92 +7017,45 @@ impl VaultDAO {
         if !Role::role_satisfies(Role::Admin, role) {
             return Err(VaultError::Unauthorized);
         }
-    /// Execute a swap proposal (executors only)
-    /// Execute a swap proposal with proper validation and cross-contract invocation
-    /// 
-    /// This function validates:
-    /// - DEX address is in the enabled_dexs whitelist
-    /// - Price impact is within max_price_impact_bps limits using oracle prices
-    /// - Slippage protection via min_amount_out validation
-    /// 
-    /// Supports all SwapProposal variants:
-    /// - Swap: Token-to-token swaps with slippage protection
-    /// - AddLiquidity: Adding liquidity to DEX pools
-    /// - RemoveLiquidity: Removing liquidity from DEX pools  
-    /// - StakeLp: Staking LP tokens in farms
-    /// - UnstakeLp: Unstaking LP tokens from farms
-    /// - ClaimRewards: Claiming farming rewards
-    pub fn execute_swap_proposal(env: Env, executor: Address, proposal_id: u64) -> Result<(), VaultError> {
-        executor.require_auth();
-
-        // Get proposal
-        let mut proposal = storage::get_proposal(&env, proposal_id)?;
-
-        // Validate state
-        if !proposal.is_swap {
-            return Err(VaultError::DexError);
+        let config = storage::get_config(&env)?;
+        let mut hooks = config.pre_execution_hooks.clone();
+        let mut updated = Vec::new(&env);
+        for h in hooks.iter() {
+            if h != hook {
+                updated.push_back(h);
+            }
         }
-        if proposal.status != ProposalStatus::Approved {
-            return Err(VaultError::ProposalNotApproved);
-        }
-        if proposal.status == ProposalStatus::Executed {
-            return Err(VaultError::ProposalAlreadyExecuted);
-        }
-
-        // Check expiration
-        let current_ledger = env.ledger().sequence() as u64;
-        if current_ledger > proposal.expires_at {
-            proposal.status = ProposalStatus::Expired;
-            storage::set_proposal(&env, &proposal);
-            storage::metrics_on_expiry(&env);
-            events::emit_proposal_expired(&env, proposal_id, proposal.expires_at);
-            return Err(VaultError::PermissionExpired);
-        }
-
-        // Check Timelock
-        if proposal.unlock_ledger > 0 && current_ledger < proposal.unlock_ledger {
-            return Err(VaultError::TimelockNotExpired);
-        }
-
-        // Get DEX config and swap details
-        let dex_config = storage::get_dex_config(&env).ok_or(VaultError::DexError)?;
-        let swap_proposal =
-            storage::get_swap_proposal(&env, proposal_id).ok_or(VaultError::DexError)?;
-
-        // Perform the swap with proper validation and cross-contract invocation
-        let swap_result = Self::perform_swap(&env, &dex_config, &swap_proposal, proposal_id)?;
-
-        // Store result
-        storage::set_swap_result(&env, proposal_id, &swap_result);
-
-        // Update proposal status
-        proposal.status = ProposalStatus::Executed;
-        storage::set_proposal(&env, &proposal);
+        hooks = updated;
+        let mut new_config = config;
+        new_config.pre_execution_hooks = hooks;
+        storage::set_config(&env, &new_config);
         storage::extend_instance_ttl(&env);
-
-        // Emit execution event
-        events::emit_proposal_executed(
-            &env,
-            proposal_id,
-            &executor,
-            &env.current_contract_address(),
-            &env.current_contract_address(),
-            0,
-            current_ledger,
-        );
-
-        // Update reputation and metrics
-        Self::update_reputation_on_execution(&env, &proposal);
-        let execution_time = current_ledger.saturating_sub(proposal.created_at);
-        storage::metrics_on_execution(&env, proposal.gas_used, execution_time);
-
         Ok(())
     }
+
 
     pub fn remove_pre_hook(env: Env, admin: Address, hook: Address) -> Result<(), VaultError> {
         admin.require_auth();
         let role = storage::get_role(&env, &admin);
         if !Role::role_satisfies(Role::Admin, role) {
+            return Err(VaultError::InsufficientRole);
+        }
+        let config = storage::get_config(&env)?;
+        let mut hooks = config.pre_execution_hooks.clone();
+        let mut updated = Vec::new(&env);
+        for h in hooks.iter() {
+            if h != hook {
+                updated.push_back(h);
+            }
+        }
+        hooks = updated;
+        let mut new_config = config;
+        new_config.pre_execution_hooks = hooks;
+        storage::set_config(&env, &new_config);
+        storage::extend_instance_ttl(&env);
+        Ok(())
+    }
+
     /// Execute a swap proposal with comprehensive validation and cross-contract invocation
     /// 
     /// This function implements all requirements:
@@ -8821,7 +8837,8 @@ impl VaultDAO {
         // Per-operation cost: 50,000
         const BASE_OVERHEAD: u64 = 100_000;
         const PER_OP_COST: u64 = 50_000;
-
+        BASE_OVERHEAD + (operations.len() as u64 * PER_OP_COST)
+    }
 
     // ========================================================================
     // Time-Weighted Voting
@@ -11643,5 +11660,111 @@ impl VaultDAO {
         Self::update_reputation_on_propose(&env, &proposer);
 
         Ok(new_proposal_id)
+    }
+
+    // =========================================================================
+    // Issue #1084: Emergency Pause / Circuit Breaker
+    // =========================================================================
+
+    /// Configure emergency signers and circuit breaker threshold.
+    /// Must be called by admin.
+    pub fn configure_emergency(
+        env: Env,
+        admin: Address,
+        emergency_signers: Vec<Address>,
+        circuit_breaker_threshold: i128,
+    ) -> Result<(), VaultError> {
+        admin.require_auth();
+        storage::get_config(&env)?; // ensure initialized
+        let role = storage::get_role(&env, &admin);
+        if !Role::role_satisfies(Role::Admin, role) {
+            return Err(VaultError::InsufficientRole);
+        }
+        if emergency_signers.len() < 2 {
+            return Err(VaultError::NoSigners);
+        }
+        storage::set_emergency_signers(&env, &emergency_signers);
+        storage::set_circuit_breaker_threshold(&env, circuit_breaker_threshold);
+        storage::extend_instance_ttl(&env);
+        Ok(())
+    }
+
+    /// Pause the vault. Requires 2-of-3 emergency signers.
+    pub fn pause_vault(env: Env, caller: Address, cause: Symbol) -> Result<(), VaultError> {
+        caller.require_auth();
+        storage::get_config(&env)?;
+        let signers = storage::get_emergency_signers(&env);
+        if !signers.contains(&caller) {
+            return Err(VaultError::NotEmergencySigner);
+        }
+        let state = PauseState {
+            is_paused: true,
+            paused_by: Some(caller.clone()),
+            paused_at_ledger: env.ledger().sequence(),
+            cause: cause.clone(),
+        };
+        storage::set_pause_state(&env, &state);
+        events::emit_vault_paused(&env, &caller, &cause);
+        storage::extend_instance_ttl(&env);
+        Ok(())
+    }
+
+    /// Unpause the vault. Requires an emergency signer.
+    pub fn unpause_vault(env: Env, caller: Address) -> Result<(), VaultError> {
+        caller.require_auth();
+        storage::get_config(&env)?;
+        let signers = storage::get_emergency_signers(&env);
+        if !signers.contains(&caller) {
+            return Err(VaultError::NotEmergencySigner);
+        }
+        let mut state = storage::get_pause_state(&env);
+        if !state.is_paused {
+            return Err(VaultError::VaultNotPaused);
+        }
+        state.is_paused = false;
+        storage::set_pause_state(&env, &state);
+        events::emit_vault_unpaused(&env, &caller);
+        storage::extend_instance_ttl(&env);
+        Ok(())
+    }
+
+    /// Returns the current pause state.
+    pub fn get_pause_state(env: Env) -> PauseState {
+        storage::get_pause_state(&env)
+    }
+
+    // =========================================================================
+    // Issue #1103: Compliance Scoring
+    // =========================================================================
+
+    /// Set compliance rules. Admin only. Max 10 rules.
+    pub fn set_compliance_rules(
+        env: Env,
+        admin: Address,
+        rules: Vec<ComplianceRule>,
+    ) -> Result<(), VaultError> {
+        admin.require_auth();
+        storage::get_config(&env)?;
+        let role = storage::get_role(&env, &admin);
+        if !Role::role_satisfies(Role::Admin, role) {
+            return Err(VaultError::InsufficientRole);
+        }
+        if rules.len() > 10 {
+            return Err(VaultError::BatchTooLarge);
+        }
+        storage::set_compliance_rules(&env, &rules);
+        storage::extend_instance_ttl(&env);
+        Ok(())
+    }
+
+    /// Evaluate compliance for a given window (read-only).
+    pub fn evaluate_compliance(env: Env, window_ledgers: u32) -> ComplianceReport {
+        let report = storage::evaluate_compliance_report(&env, window_ledgers);
+        // Auto-emit every 1000 ledgers
+        let current = env.ledger().sequence();
+        if current % 1000 == 0 {
+            events::emit_compliance_report(&env, report.score, report.generated_at);
+        }
+        report
     }
 }

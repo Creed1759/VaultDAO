@@ -1768,3 +1768,57 @@ pub struct TransferDetails {
 }
 
 
+
+// ============================================================================
+// Emergency Pause / Circuit Breaker (#1084)
+// ============================================================================
+
+/// Pause state for the vault
+#[contracttype]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PauseState {
+    /// Whether the vault is currently paused
+    pub is_paused: bool,
+    /// Address that triggered the pause (None if not paused)
+    pub paused_by: Option<Address>,
+    /// Ledger at which the pause was triggered
+    pub paused_at_ledger: u32,
+    /// Cause of pause: "manual" | "circuit_breaker"
+    pub cause: Symbol,
+}
+
+// ============================================================================
+// Compliance Scoring (#1103)
+// ============================================================================
+
+/// Compliance rule evaluator variant
+#[contracttype]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum RuleEvaluator {
+    TimelockAdherence,
+    SpendingLimitCompliance,
+    VotingParticipation,
+    AuditTrailCompleteness,
+}
+
+/// A single compliance rule
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct ComplianceRule {
+    pub rule_id: u32,
+    pub description: Symbol,
+    pub weight: u32,
+    pub evaluator: RuleEvaluator,
+}
+
+/// Result of compliance evaluation
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct ComplianceReport {
+    /// Overall score 0–100
+    pub score: u32,
+    /// IDs of rules that failed
+    pub failed_rules: Vec<u32>,
+    /// Ledger at which this report was generated
+    pub generated_at: u32,
+}
