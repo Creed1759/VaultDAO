@@ -1218,3 +1218,64 @@ pub fn emit_metrics_bucket_updated(
         (executed, rejected, expired),
     );
 }
+
+// ============================================================================
+// Scoped Delegation Events (#1082)
+// ============================================================================
+
+pub fn emit_scoped_delegation_created(env: &Env, id: u64, delegator: &Address, delegate: &Address, max_amount: i128) {
+    env.events().publish(
+        (Symbol::new(env, "scoped_deleg_created"), id),
+        (delegator.clone(), delegate.clone(), max_amount),
+    );
+}
+
+pub fn emit_scoped_delegation_revoked(env: &Env, id: u64, revoker: &Address) {
+    env.events().publish(
+        (Symbol::new(env, "scoped_deleg_revoked"), id),
+        revoker.clone(),
+    );
+}
+
+pub fn emit_delegate_voted(env: &Env, delegation_id: u64, proposal_id: u64, delegate: &Address, approve: bool) {
+    env.events().publish(
+        (Symbol::new(env, "delegate_voted"), delegation_id),
+        (proposal_id, delegate.clone(), approve),
+    );
+}
+
+// ============================================================================
+// Balance Snapshot Events (#1080)
+// ============================================================================
+
+pub fn emit_snapshot_taken(env: &Env, ledger: u64, token_count: u32) {
+    env.events().publish(
+        (Symbol::new(env, "snapshot_taken"),),
+        (ledger, token_count),
+    );
+}
+
+// ============================================================================
+// Governance Proposal Events (#1068)
+// ============================================================================
+
+pub fn emit_gov_proposal_created(env: &Env, id: u64, proposer: &Address, param: u32) {
+    env.events().publish(
+        (Symbol::new(env, "gov_proposed"), id),
+        (proposer.clone(), param),
+    );
+}
+
+pub fn emit_gov_proposal_approved(env: &Env, id: u64, voter: &Address, count: u32) {
+    env.events().publish(
+        (Symbol::new(env, "gov_approved"), id),
+        (voter.clone(), count),
+    );
+}
+
+pub fn emit_gov_proposal_executed(env: &Env, id: u64, param: u32, new_value: i128) {
+    env.events().publish(
+        (Symbol::new(env, "gov_executed"), id),
+        (param, new_value),
+    );
+}

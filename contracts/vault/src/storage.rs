@@ -24,13 +24,14 @@ use crate::errors::VaultError;
 use crate::types::{
     AuditEntry, BatchExecutionResult, BatchTransaction, Comment, Config, DelegatedPermission,
     Delegation, DelegationHistory, DexConfig, Escrow, ExecutionFeeEstimate, ExecutionSnapshot,
-    FeeStructure, FundingRound, FundingRoundConfig, GasConfig, InsuranceConfig, ListMode,
-    NotificationPreferences, PermissionGrant, Proposal, ProposalAmendment, ProposalStatus,
+    FeeStructure, FundingRound, FundingRoundConfig, GasConfig, GovernanceProposal, InsuranceConfig,
+    ListMode, NotificationPreferences, PermissionGrant, Proposal, ProposalAmendment, ProposalStatus,
     ProposalTemplate, RecoveryProposal, Reputation, ReputationConfig, RetryState, Role,
-    RoleAssignment, StakeRecord, StakingConfig, Subscription, SwapProposal, SwapResult,
-    TimeWeightedConfig, TokenLock, VaultMetrics, VelocityConfig, VotingStrategy, BridgeConfig,
-    CrossChainProposal,
+    RoleAssignment, ScopedDelegation, StakeRecord, StakingConfig, Subscription, SwapProposal,
+    SwapResult, TimeWeightedConfig, TokenLock, VaultMetrics, VelocityConfig, VotingStrategy,
+    BridgeConfig, CrossChainProposal,
 };
+use crate::types_balance_snapshot::BalanceSnapshot;
 
 /// Core storage key definitions (kept minimal to avoid size limits)
 #[contracttype]
@@ -122,6 +123,7 @@ pub enum CounterKey {
     Recovery = 5,
     FundingRound = 6,
     Batch = 7,
+    ScopedDelegation = 8,
 }
 
 /// Feature-specific storage keys (split to avoid enum size limits)
@@ -232,6 +234,24 @@ pub enum FeatureKey {
     MetricsBucketIndex,
     /// Pending config change proposal ID -> u64
     PendingConfig,
+    /// Scoped delegation by ID -> ScopedDelegation
+    ScopedDelegation(u64),
+    /// Scoped delegation IDs by delegator -> Vec<u64>
+    ScopedDelegationsByDelegator(Address),
+    /// Balance snapshots -> Vec<BalanceSnapshot>
+    BalanceSnapshots,
+    /// Snapshot interval in ledgers -> u32
+    SnapshotInterval,
+    /// Last snapshot ledger -> u64
+    LastSnapshotLedger,
+    /// Governance proposal by ID -> GovernanceProposal
+    GovernanceProposal(u64),
+    /// Governance supermajority threshold (percentage) -> u32
+    GovernanceThreshold,
+    /// Active governance proposal count -> u32
+    ActiveGovernanceCount,
+    /// Next governance proposal ID -> u64
+    NextGovernanceId,
 }
 
 /// TTL constants (in ledgers, ~5 seconds each)
@@ -2597,4 +2617,151 @@ pub fn remove_delegator_index(env: &Env, delegate: &Address, delegator: &Address
     env.storage()
         .instance()
         .set(&DataKey::DelegatorsFor(delegate.clone()), &updated);
+}
+
+// ============================================================================
+// Scoped Delegation (#1082)
+// ============================================================================
+
+pub fn get_next_scoped_delegation_id(env: &Env) -> u64 {
+    env.storage()
+        .instance()
+        .get(&FeatureKey::Counter(CounterKey::ScopedDelegation))
+        .unwrap_or(1)
+}
+
+pub fn increment_scoped_delegation_id(env: &Env) -> u64 {
+    let id = get_next_scoped_delegation_id(env);
+    env.storage()
+        .instance()
+        .set(&FeatureKey::Counter(CounterKey::ScopedDelegation), &(id + 1));
+    id
+}
+
+pub fn set_scoped_delegation(env: &Env, d: &ScopedDelegation) {
+    let key = FeatureKey::ScopedDelegation(d.id);
+    env.storage().persistent().set(&key, d);
+    env.storage().persistent().extend_ttl(&key, PERSISTENT_TTL_THRESHOLD, PERSISTENT_TTL);
+}
+
+pub fn get_scoped_delegation(env: &Env, id: u64) -> Option<ScopedDelegation> {
+    env.storage().persistent().get(&FeatureKey::ScopedDelegation(id))
+}
+
+pub fn get_scoped_delegations_by_delegator(env: &Env, delegator: &Address) -> Vec<u64> {
+    env.storage()
+        .persistent()
+        .get(&FeatureKey::ScopedDelegationsByDelegator(delegator.clone()))
+        .unwrap_or_else(|| Vec::new(env))
+}
+
+pub fn set_scoped_delegations_by_delegator(env: &Env, delegator: &Address, ids: &Vec<u64>) {
+    let key = FeatureKey::ScopedDelegationsByDelegator(delegator.clone());
+    env.storage().persistent().set(&key, ids);
+    env.storage().persistent().extend_ttl(&key, PERSISTENT_TTL_THRESHOLD, PERSISTENT_TTL);
+}
+
+// ============================================================================
+// Balance Snapshots (#1080)
+// ============================================================================
+
+const MAX_SNAPSHOTS: u32 = 90;
+
+pub fn get_snapshots(env: &Env) -> Vec<BalanceSnapshot> {
+    env.storage()
+        .persistent()
+        .get(&FeatureKey::BalanceSnapshots)
+        .unwrap_or_else(|| Vec::new(env))
+}
+
+pub fn add_snapshot(env: &Env, snapshot: &BalanceSnapshot) {
+    let mut snapshots = get_snapshots(env);
+    if snapshots.len() >= MAX_SNAPSHOTS {
+        snapshots.remove(0);
+    }
+    snapshots.push_back(snapshot.clone());
+    let key = FeatureKey::BalanceSnapshots;
+    env.storage().persistent().set(&key, &snapshots);
+    env.storage().persistent().extend_ttl(&key, PERSISTENT_TTL_THRESHOLD, PERSISTENT_TTL);
+
+    env.storage().persistent().set(&FeatureKey::LastSnapshotLedger, &snapshot.ledger);
+}
+
+pub fn get_last_snapshot_ledger(env: &Env) -> u64 {
+    env.storage().persistent().get(&FeatureKey::LastSnapshotLedger).unwrap_or(0)
+}
+
+pub fn get_snapshot_interval(env: &Env) -> u32 {
+    env.storage().instance().get(&FeatureKey::SnapshotInterval).unwrap_or(0)
+}
+
+pub fn set_snapshot_interval(env: &Env, interval: u32) {
+    env.storage().instance().set(&FeatureKey::SnapshotInterval, &interval);
+}
+
+pub fn get_snapshot_at(env: &Env, target_ledger: u32) -> Option<BalanceSnapshot> {
+    let snapshots = get_snapshots(env);
+    let len = snapshots.len();
+    if len == 0 {
+        return None;
+    }
+    // Binary search for nearest snapshot at or before target_ledger
+    let target = target_ledger as u64;
+    let mut lo: u32 = 0;
+    let mut hi: u32 = len - 1;
+    let mut best: Option<BalanceSnapshot> = None;
+
+    while lo <= hi {
+        let mid = lo + (hi - lo) / 2;
+        let snap = snapshots.get(mid).unwrap();
+        if snap.ledger <= target {
+            best = Some(snap);
+            if mid == hi { break; }
+            lo = mid + 1;
+        } else {
+            if mid == 0 { break; }
+            hi = mid - 1;
+        }
+    }
+    best
+}
+
+// ============================================================================
+// Governance Proposals (#1068)
+// ============================================================================
+
+pub fn get_next_governance_id(env: &Env) -> u64 {
+    env.storage().instance().get(&FeatureKey::NextGovernanceId).unwrap_or(1)
+}
+
+pub fn increment_governance_id(env: &Env) -> u64 {
+    let id = get_next_governance_id(env);
+    env.storage().instance().set(&FeatureKey::NextGovernanceId, &(id + 1));
+    id
+}
+
+pub fn get_governance_proposal(env: &Env, id: u64) -> Option<GovernanceProposal> {
+    env.storage().persistent().get(&FeatureKey::GovernanceProposal(id))
+}
+
+pub fn set_governance_proposal(env: &Env, gp: &GovernanceProposal) {
+    let key = FeatureKey::GovernanceProposal(gp.id);
+    env.storage().persistent().set(&key, gp);
+    env.storage().persistent().extend_ttl(&key, PERSISTENT_TTL_THRESHOLD, PERSISTENT_TTL);
+}
+
+pub fn get_governance_threshold(env: &Env) -> u32 {
+    env.storage().instance().get(&FeatureKey::GovernanceThreshold).unwrap_or(67)
+}
+
+pub fn set_governance_threshold(env: &Env, threshold: u32) {
+    env.storage().instance().set(&FeatureKey::GovernanceThreshold, &threshold);
+}
+
+pub fn get_active_governance_count(env: &Env) -> u32 {
+    env.storage().instance().get(&FeatureKey::ActiveGovernanceCount).unwrap_or(0)
+}
+
+pub fn set_active_governance_count(env: &Env, count: u32) {
+    env.storage().instance().set(&FeatureKey::ActiveGovernanceCount, &count);
 }

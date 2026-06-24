@@ -36,8 +36,9 @@ use types::{
     Subscription, SubscriptionStatus, SubscriptionTier, SwapProposal, SwapResult,
     TemplateOverrides, ThresholdStrategy, TransferDetails, VaultAction, VaultMetrics,
     VaultOracleConfig, VaultPriceData, VelocityConfig, VotingStrategy,
-    VoteChoice,
+    VoteChoice, ScopedDelegation, ConfigParam, GovernanceProposal,
 };
+use types_balance_snapshot::BalanceSnapshot;
 
 /// The main contract structure for VaultDAO.
 ///
@@ -125,7 +126,12 @@ mod test_retry;
 mod test_staking;
 #[cfg(test)]
 mod test_fees;
-
+#[cfg(test)]
+mod test_balance_snapshot;
+#[cfg(test)]
+mod test_scoped_delegation;
+#[cfg(test)]
+mod test_governance;
 
 #[cfg(test)]
 pub mod mock_oracle {
@@ -6954,6 +6960,15 @@ impl VaultDAO {
         if !Role::role_satisfies(Role::Admin, role) {
             return Err(VaultError::Unauthorized);
         }
+        let mut config = storage::get_config(&env)?;
+        if !config.pre_execution_hooks.contains(&hook) {
+            config.pre_execution_hooks.push_back(hook.clone());
+            storage::set_config(&env, &config);
+        }
+        events::emit_hook_registered(&env, &hook, true);
+        Ok(())
+    }
+
     /// Execute a swap proposal (executors only)
     /// Execute a swap proposal with proper validation and cross-contract invocation
     /// 
@@ -7040,6 +7055,21 @@ impl VaultDAO {
         admin.require_auth();
         let role = storage::get_role(&env, &admin);
         if !Role::role_satisfies(Role::Admin, role) {
+            return Err(VaultError::InsufficientRole);
+        }
+        let mut config = storage::get_config(&env)?;
+        let mut new_hooks = Vec::new(&env);
+        for h in config.pre_execution_hooks.iter() {
+            if h != hook {
+                new_hooks.push_back(h);
+            }
+        }
+        config.pre_execution_hooks = new_hooks;
+        storage::set_config(&env, &config);
+        events::emit_hook_removed(&env, &hook, true);
+        Ok(())
+    }
+
     /// Execute a swap proposal with comprehensive validation and cross-contract invocation
     /// 
     /// This function implements all requirements:
@@ -8817,11 +8847,10 @@ impl VaultDAO {
 
     /// Estimate gas cost for batch operations
     fn estimate_batch_gas(_env: &Env, operations: &Vec<BatchOperation>) -> u64 {
-        // Base overhead: 100,000
-        // Per-operation cost: 50,000
         const BASE_OVERHEAD: u64 = 100_000;
         const PER_OP_COST: u64 = 50_000;
-
+        BASE_OVERHEAD + (operations.len() as u64 * PER_OP_COST)
+    }
 
     // ========================================================================
     // Time-Weighted Voting
@@ -11643,5 +11672,363 @@ impl VaultDAO {
         Self::update_reputation_on_propose(&env, &proposer);
 
         Ok(new_proposal_id)
+    }
+}
+
+// ============================================================================
+// Issues #1080, #1082, #1068 — Balance Snapshots, Scoped Delegation, Governance
+// ============================================================================
+
+#[contractimpl]
+impl VaultDAO {
+    // ── Balance Snapshots (#1080) ──────────────────────────────────────────
+
+    pub fn set_snapshot_interval(env: Env, admin: Address, interval: u32) -> Result<(), VaultError> {
+        admin.require_auth();
+        let config = storage::get_config(&env)?;
+        if !config.signers.contains(&admin) {
+            return Err(VaultError::Unauthorized);
+        }
+        if storage::get_role(&env, &admin) != Role::Admin {
+            return Err(VaultError::InsufficientRole);
+        }
+        if interval < 100 {
+            return Err(VaultError::InvalidAmount);
+        }
+        storage::set_snapshot_interval(&env, interval);
+        Ok(())
+    }
+
+    pub fn take_manual_snapshot(env: Env, admin: Address) -> Result<BalanceSnapshot, VaultError> {
+        admin.require_auth();
+        let config = storage::get_config(&env)?;
+        if storage::get_role(&env, &admin) != Role::Admin {
+            return Err(VaultError::InsufficientRole);
+        }
+
+        let current_ledger = env.ledger().sequence() as u64;
+        let last = storage::get_last_snapshot_ledger(&env);
+        if current_ledger.saturating_sub(last) < 100 {
+            return Err(VaultError::InvalidAmount);
+        }
+
+        let snapshot = BalanceSnapshot {
+            ledger: current_ledger,
+            timestamp: env.ledger().timestamp(),
+            balances: Vec::new(&env),
+            total_staked: 0,
+            pending_releases: 0,
+        };
+        storage::add_snapshot(&env, &snapshot);
+        events::emit_snapshot_taken(&env, current_ledger, 0);
+        Ok(snapshot)
+    }
+
+    pub fn get_snapshot_at(env: Env, target_ledger: u32) -> Option<BalanceSnapshot> {
+        storage::get_snapshot_at(&env, target_ledger)
+    }
+
+    pub fn get_latest_snapshot(env: Env) -> Option<BalanceSnapshot> {
+        let snapshots = storage::get_snapshots(&env);
+        if snapshots.is_empty() {
+            None
+        } else {
+            snapshots.get(snapshots.len() - 1)
+        }
+    }
+
+    // ── Scoped Delegation (#1082) ─────────────────────────────────────────
+
+    pub fn create_scoped_delegation(
+        env: Env,
+        delegator: Address,
+        delegate: Address,
+        max_amount: i128,
+        expires_at_ledger: u32,
+        allowed_proposal_ids: Vec<u64>,
+    ) -> Result<u64, VaultError> {
+        delegator.require_auth();
+        let config = storage::get_config(&env)?;
+        if !config.signers.contains(&delegator) {
+            return Err(VaultError::NotASigner);
+        }
+        if delegator == delegate {
+            return Err(VaultError::CircularDelegation);
+        }
+
+        // Max 3 active delegations per delegator
+        let existing_ids = storage::get_scoped_delegations_by_delegator(&env, &delegator);
+        let mut active_count = 0u32;
+        for id in existing_ids.iter() {
+            if let Some(d) = storage::get_scoped_delegation(&env, id) {
+                if d.is_active {
+                    active_count += 1;
+                }
+            }
+        }
+        if active_count >= 3 {
+            return Err(VaultError::BatchTooLarge);
+        }
+
+        let id = storage::increment_scoped_delegation_id(&env);
+        let current_ledger = env.ledger().sequence() as u64;
+
+        let delegation = ScopedDelegation {
+            id,
+            delegator: delegator.clone(),
+            delegate: delegate.clone(),
+            max_amount,
+            expires_at_ledger,
+            proposal_ids: allowed_proposal_ids,
+            is_active: true,
+            created_at: current_ledger,
+        };
+
+        storage::set_scoped_delegation(&env, &delegation);
+
+        let mut ids = storage::get_scoped_delegations_by_delegator(&env, &delegator);
+        ids.push_back(id);
+        storage::set_scoped_delegations_by_delegator(&env, &delegator, &ids);
+
+        events::emit_scoped_delegation_created(&env, id, &delegator, &delegate, max_amount);
+        Ok(id)
+    }
+
+    pub fn revoke_scoped_delegation(env: Env, caller: Address, delegation_id: u64) -> Result<(), VaultError> {
+        caller.require_auth();
+        let mut d = storage::get_scoped_delegation(&env, delegation_id)
+            .ok_or(VaultError::ProposalNotFound)?;
+
+        let is_admin = storage::get_role(&env, &caller) == Role::Admin;
+        if caller != d.delegator && !is_admin {
+            return Err(VaultError::Unauthorized);
+        }
+
+        d.is_active = false;
+        storage::set_scoped_delegation(&env, &d);
+        events::emit_scoped_delegation_revoked(&env, delegation_id, &caller);
+        Ok(())
+    }
+
+    pub fn vote_as_delegate(
+        env: Env,
+        delegate: Address,
+        delegation_id: u64,
+        proposal_id: u64,
+        approve: bool,
+    ) -> Result<(), VaultError> {
+        delegate.require_auth();
+        let d = storage::get_scoped_delegation(&env, delegation_id)
+            .ok_or(VaultError::ProposalNotFound)?;
+
+        if !d.is_active {
+            return Err(VaultError::Unauthorized);
+        }
+        if d.delegate != delegate {
+            return Err(VaultError::Unauthorized);
+        }
+        let current_ledger = env.ledger().sequence() as u32;
+        if current_ledger > d.expires_at_ledger {
+            return Err(VaultError::ProposalExpired);
+        }
+
+        // Scope check: proposal_id must be in allowed list (if specified)
+        if !d.proposal_ids.is_empty() && !d.proposal_ids.contains(&proposal_id) {
+            return Err(VaultError::Unauthorized);
+        }
+
+        let mut proposal = storage::get_proposal(&env, proposal_id)?;
+        if proposal.status != ProposalStatus::Pending {
+            return Err(VaultError::ProposalNotPending);
+        }
+
+        // Scope check: amount within max_amount
+        if proposal.amount > d.max_amount {
+            return Err(VaultError::ExceedsProposalLimit);
+        }
+
+        // If delegator already voted directly, delegation is void for this proposal
+        if proposal.approvals.contains(&d.delegator) || proposal.abstentions.contains(&d.delegator) {
+            return Err(VaultError::AlreadyApproved);
+        }
+
+        // If delegate already voted directly, don't count twice
+        if proposal.approvals.contains(&delegate) || proposal.abstentions.contains(&delegate) {
+            return Err(VaultError::AlreadyApproved);
+        }
+
+        // Cast vote on behalf of delegator
+        if approve {
+            proposal.approvals.push_back(d.delegator.clone());
+        } else {
+            proposal.abstentions.push_back(d.delegator.clone());
+        }
+        storage::set_proposal(&env, &proposal);
+
+        events::emit_delegate_voted(&env, delegation_id, proposal_id, &delegate, approve);
+        Ok(())
+    }
+
+    pub fn get_scoped_delegation(env: Env, delegation_id: u64) -> Option<ScopedDelegation> {
+        storage::get_scoped_delegation(&env, delegation_id)
+    }
+
+    pub fn get_delegator_scoped_delegations(env: Env, delegator: Address) -> Vec<ScopedDelegation> {
+        let ids = storage::get_scoped_delegations_by_delegator(&env, &delegator);
+        let mut result = Vec::new(&env);
+        for id in ids.iter() {
+            if let Some(d) = storage::get_scoped_delegation(&env, id) {
+                result.push_back(d);
+            }
+        }
+        result
+    }
+
+    // ── Governance Parameter Change (#1068) ───────────────────────────────
+
+    pub fn set_governance_threshold(env: Env, admin: Address, percentage: u32) -> Result<(), VaultError> {
+        admin.require_auth();
+        if storage::get_role(&env, &admin) != Role::Admin {
+            return Err(VaultError::InsufficientRole);
+        }
+        if percentage < 51 || percentage > 100 {
+            return Err(VaultError::InvalidAmount);
+        }
+        storage::set_governance_threshold(&env, percentage);
+        Ok(())
+    }
+
+    pub fn propose_config_change(
+        env: Env,
+        proposer: Address,
+        param: ConfigParam,
+        new_value: i128,
+    ) -> Result<u64, VaultError> {
+        proposer.require_auth();
+        let config = storage::get_config(&env)?;
+        if !config.signers.contains(&proposer) {
+            return Err(VaultError::NotASigner);
+        }
+
+        // Max 3 active governance proposals
+        if storage::get_active_governance_count(&env) >= 3 {
+            return Err(VaultError::ConfigChangeInProgress);
+        }
+
+        // Validate parameter bounds
+        match param {
+            ConfigParam::Threshold => {
+                let v = new_value as u32;
+                if v == 0 || v > config.signers.len() {
+                    return Err(VaultError::ThresholdTooHigh);
+                }
+            }
+            ConfigParam::Quorum => {
+                let v = new_value as u32;
+                if v > config.signers.len() {
+                    return Err(VaultError::QuorumTooHigh);
+                }
+            }
+            ConfigParam::SpendingLimit | ConfigParam::DailyLimit | ConfigParam::WeeklyLimit => {
+                if new_value <= 0 {
+                    return Err(VaultError::InvalidAmount);
+                }
+            }
+            ConfigParam::TimelockDelay => {
+                if new_value < 0 {
+                    return Err(VaultError::InvalidAmount);
+                }
+            }
+        }
+
+        let current_ledger = env.ledger().sequence() as u64;
+        let id = storage::increment_governance_id(&env);
+        let gp = GovernanceProposal {
+            id,
+            proposer: proposer.clone(),
+            param: param.clone(),
+            new_value,
+            approvals: Vec::new(&env),
+            status: ProposalStatus::Pending,
+            created_at: current_ledger,
+            expires_at: current_ledger + PROPOSAL_EXPIRY_LEDGERS,
+        };
+
+        storage::set_governance_proposal(&env, &gp);
+        storage::set_active_governance_count(&env, storage::get_active_governance_count(&env) + 1);
+        events::emit_gov_proposal_created(&env, id, &proposer, param as u32);
+        Ok(id)
+    }
+
+    pub fn approve_config_change(env: Env, voter: Address, gov_proposal_id: u64) -> Result<(), VaultError> {
+        voter.require_auth();
+        let config = storage::get_config(&env)?;
+        if !config.signers.contains(&voter) {
+            return Err(VaultError::NotASigner);
+        }
+
+        let mut gp = storage::get_governance_proposal(&env, gov_proposal_id)
+            .ok_or(VaultError::ProposalNotFound)?;
+
+        if gp.status != ProposalStatus::Pending {
+            return Err(VaultError::ProposalNotPending);
+        }
+        if gp.approvals.contains(&voter) {
+            return Err(VaultError::AlreadyApproved);
+        }
+
+        let current_ledger = env.ledger().sequence() as u64;
+        if current_ledger > gp.expires_at {
+            return Err(VaultError::ProposalExpired);
+        }
+
+        gp.approvals.push_back(voter.clone());
+
+        // Check supermajority
+        let threshold_pct = storage::get_governance_threshold(&env);
+        let required = ((config.signers.len() as u64 * threshold_pct as u64 + 99) / 100) as u32;
+        if gp.approvals.len() >= required {
+            gp.status = ProposalStatus::Approved;
+        }
+
+        storage::set_governance_proposal(&env, &gp);
+        events::emit_gov_proposal_approved(&env, gov_proposal_id, &voter, gp.approvals.len());
+        Ok(())
+    }
+
+    pub fn execute_config_change(env: Env, caller: Address, gov_proposal_id: u64) -> Result<(), VaultError> {
+        caller.require_auth();
+        let mut gp = storage::get_governance_proposal(&env, gov_proposal_id)
+            .ok_or(VaultError::ProposalNotFound)?;
+
+        if gp.status != ProposalStatus::Approved {
+            return Err(VaultError::ProposalNotApproved);
+        }
+
+        let mut config = storage::get_config(&env)?;
+
+        match gp.param {
+            ConfigParam::Threshold => { config.threshold = gp.new_value as u32; }
+            ConfigParam::SpendingLimit => { config.spending_limit = gp.new_value; }
+            ConfigParam::DailyLimit => { config.daily_limit = gp.new_value; }
+            ConfigParam::WeeklyLimit => { config.weekly_limit = gp.new_value; }
+            ConfigParam::TimelockDelay => { config.timelock_delay = gp.new_value as u64; }
+            ConfigParam::Quorum => { config.quorum = gp.new_value as u32; }
+        }
+
+        storage::set_config(&env, &config);
+        gp.status = ProposalStatus::Executed;
+        storage::set_governance_proposal(&env, &gp);
+
+        let count = storage::get_active_governance_count(&env);
+        storage::set_active_governance_count(&env, count.saturating_sub(1));
+
+        events::emit_gov_proposal_executed(&env, gov_proposal_id, gp.param as u32, gp.new_value);
+        events::emit_config_updated(&env, &caller);
+        Ok(())
+    }
+
+    pub fn get_governance_proposal(env: Env, id: u64) -> Option<GovernanceProposal> {
+        storage::get_governance_proposal(&env, id)
     }
 }

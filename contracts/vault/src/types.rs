@@ -1755,6 +1755,52 @@ pub struct ExecutionSnapshot {
 
 
 
+// ============================================================================
+// Scoped Delegation (#1082)
+// ============================================================================
+
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct ScopedDelegation {
+    pub id: u64,
+    pub delegator: Address,
+    pub delegate: Address,
+    pub max_amount: i128,
+    pub expires_at_ledger: u32,
+    pub proposal_ids: Vec<u64>,
+    pub is_active: bool,
+    pub created_at: u64,
+}
+
+// ============================================================================
+// Governance Parameter Change (#1068)
+// ============================================================================
+
+#[contracttype]
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[repr(u32)]
+pub enum ConfigParam {
+    Threshold = 0,
+    SpendingLimit = 1,
+    DailyLimit = 2,
+    WeeklyLimit = 3,
+    TimelockDelay = 4,
+    Quorum = 5,
+}
+
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct GovernanceProposal {
+    pub id: u64,
+    pub proposer: Address,
+    pub param: ConfigParam,
+    pub new_value: i128,
+    pub approvals: Vec<Address>,
+    pub status: ProposalStatus,
+    pub created_at: u64,
+    pub expires_at: u64,
+}
+
 /// Details of a transfer
 #[contracttype]
 #[derive(Clone, Debug)]
