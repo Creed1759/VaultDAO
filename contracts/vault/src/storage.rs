@@ -265,6 +265,8 @@ pub const INSTANCE_TTL: u32 = DAY_IN_LEDGERS * 30; // 30 days
 pub const INSTANCE_TTL_THRESHOLD: u32 = DAY_IN_LEDGERS * 7; // Extend when below 7 days
 pub const PERSISTENT_TTL: u32 = DAY_IN_LEDGERS * 30; // 30 days
 pub const PERSISTENT_TTL_THRESHOLD: u32 = DAY_IN_LEDGERS * 7; // Extend when below 7 days
+/// Default volume-tracking window for the tiered fee system (~30 days)
+pub const VOLUME_WINDOW_DEFAULT: u64 = DAY_IN_LEDGERS as u64 * 30;
 
 // ============================================================================
 // Signer tiers
