@@ -93,6 +93,10 @@ pub struct InitConfig {
     pub staking_config: StakingConfig,
     /// Proposal ID namespace prefix for multi-vault coordination (must be multiple of 1_000_000)
     pub proposal_id_prefix: u64,
+    /// Grace period in ledgers after voting deadline before auto-expiry (default: 100)
+    pub grace_period_ledgers: u64,
+    /// Vote weight model: Flat, TokenWeighted, or Quadratic
+    pub vote_weight: VoteWeight,
 }
 
 /// Vault configuration
@@ -138,6 +142,10 @@ pub struct Config {
     pub staking_config: StakingConfig,
     /// Proposal ID namespace prefix for multi-vault coordination
     pub proposal_id_prefix: u64,
+    /// Grace period in ledgers after voting deadline before auto-expiry (default: 100)
+    pub grace_period_ledgers: u64,
+    /// Vote weight model: Flat, TokenWeighted, or Quadratic
+    pub vote_weight: VoteWeight,
 }
 
 /// Audit record for a cancelled proposal
@@ -192,6 +200,19 @@ pub enum VotingStrategy {
     Quadratic,
     /// Conviction voting (simplified)
     Conviction,
+}
+
+/// Vote weight model for threshold calculations.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[repr(u32)]
+pub enum VoteWeight {
+    /// 1 vote per signer regardless of token balance.
+    Flat = 0,
+    /// Vote weight equals raw token balance.
+    TokenWeighted = 1,
+    /// Vote weight equals floor(sqrt(token_balance)). Zero balance counts as 1.
+    Quadratic = 2,
 }
 
 /// Amount-based threshold tier
