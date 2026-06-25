@@ -17,7 +17,7 @@
 //!
 //! 4. **Bit Packing**: Boolean flags are combined into a single u8 bitfield where possible.
 
-use soroban_sdk::{contracttype, Address, Env, Map, String, Symbol, Vec};
+use soroban_sdk::{contracttype, Address, BytesN, Env, Map, String, Symbol, Vec};
 
 /// Oracle configuration for price feeds
 #[contracttype]
@@ -70,10 +70,6 @@ pub struct InitConfig {
     pub velocity_limit: VelocityConfig,
     /// Threshold strategy configuration
     pub threshold_strategy: ThresholdStrategy,
-    /// Pre-execution hooks
-    pub pre_execution_hooks: Vec<Address>,
-    /// Post-execution hooks
-    pub post_execution_hooks: Vec<Address>,
     /// Default voting deadline in ledgers (0 = no deadline)
     pub default_voting_deadline: u64,
     /// Addresses allowed to veto proposals.
@@ -82,7 +78,12 @@ pub struct InitConfig {
     pub retry_config: RetryConfig,
     /// Recovery configuration
     pub recovery_config: RecoveryConfig,
-    // pub staking_config: StakingConfig, // Feature incomplete
+    /// Staking configuration
+    pub staking_config: StakingConfig,
+    /// Pre-execution hook addresses
+    pub pre_execution_hooks: Vec<Address>,
+    /// Post-execution hook addresses
+    pub post_execution_hooks: Vec<Address>,
 }
 
 /// Vault configuration
@@ -124,6 +125,20 @@ pub struct Config {
     /// Recovery configuration
     pub recovery_config: RecoveryConfig,
     // pub staking_config: StakingConfig, // Feature incomplete
+
+    // ---- Issue #1081: Multi-Token Vault Support ----
+    /// Supported token addresses (max 10). The first entry is the default token and is never removable.
+    pub supported_tokens: Vec<Address>,
+    /// Per-token daily spending limits keyed by token address index in supported_tokens
+    pub token_daily_limits: Vec<i128>,
+    /// Per-token weekly spending limits
+    pub token_weekly_limits: Vec<i128>,
+
+    // ---- Issue #1064: Streaming Rate Limiter ----
+    /// Maximum cumulative stream outflow allowed within the rolling window (in stroops, 0 = disabled)
+    pub stream_max_window_amount: i128,
+    /// Burst allowance multiplier * 100 (e.g. 150 = 1.5x). Default 150.
+    pub burst_factor: u32,
 }
 
 /// Audit record for a cancelled proposal
@@ -376,6 +391,9 @@ pub struct Proposal {
     pub abstentions: Vec<Address>,
     /// IPFS hashes of supporting documents
     pub attachments: Vec<String>,
+    /// Merkle root of attachment hashes — zero hash if no attachments.
+    /// Computed at proposal creation for tamper-evidence. (Issue #1063)
+    pub attachment_merkle_root: BytesN<32>,
     /// Current status
     pub status: ProposalStatus,
     /// Proposal urgency level
@@ -1604,4 +1622,86 @@ pub struct BatchExecutionResult {
     pub successful_ops: u32,
     /// Number of failed operations
     pub failed_ops: u32,
+}
+
+// ============================================================================
+// Issue #1064: Streaming Rate Limiter
+// ============================================================================
+
+/// Rolling-window tracker for cumulative stream outflow.
+/// Stored in Temporary storage so it auto-evicts after TTL expires.
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct StreamRateWindow {
+    /// Total amount streamed within the current window
+    pub total_streamed_in_window: i128,
+    /// Ledger sequence number when this window started
+    pub window_start_ledger: u32,
+}
+
+// ============================================================================
+// Issue #1075: Insurance Pool Governance — Claim Voting
+// ============================================================================
+
+/// Status of an insurance claim
+#[contracttype]
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[repr(u32)]
+pub enum InsuranceClaimStatus {
+    /// Awaiting votes
+    Pending = 0,
+    /// Approved by staker majority — funds released
+    Approved = 1,
+    /// Rejected by staker majority — bond slashed
+    Rejected = 2,
+    /// Vote deadline passed without majority — treated as rejected
+    Expired = 3,
+}
+
+/// An on-chain insurance claim submitted by a vault participant.
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct InsuranceClaim {
+    /// Unique claim ID
+    pub id: u64,
+    /// Address making the claim
+    pub claimant: Address,
+    /// Amount claimed from the insurance pool (in stroops)
+    pub amount: i128,
+    /// SHA-256 hash of supporting evidence (e.g. IPFS CID or document hash)
+    pub evidence_hash: BytesN<32>,
+    /// Ledger sequence number when voting closes
+    pub vote_deadline: u64,
+    /// Weighted approve votes (sum of staker stakes)
+    pub approve_weight: i128,
+    /// Weighted reject votes (sum of staker stakes)
+    pub reject_weight: i128,
+    /// Token the claim is denominated in (must be in insurance pool)
+    pub token: Address,
+    /// Minimum claimant bond locked until resolution
+    pub bond_amount: i128,
+    /// Whether the bond has been returned/slashed
+    pub bond_settled: bool,
+    /// Current claim status
+    pub status: InsuranceClaimStatus,
+    /// Ledger when claim was submitted
+    pub created_at: u64,
+}
+
+// ============================================================================
+// Issue #1081: Multi-Token Vault Support
+// ============================================================================
+
+/// Per-token spending limits stored alongside each supported token
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct TokenSpendingConfig {
+    /// Token contract address
+    pub token: Address,
+    /// Maximum amount per proposal for this token
+    pub daily_limit: i128,
+    /// Maximum aggregate weekly spending for this token
+    pub weekly_limit: i128,
+    /// Whether this is the default (non-removable) token
+    pub is_default: bool,
 }

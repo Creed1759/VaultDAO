@@ -2,9 +2,7 @@
 
 use super::*;
 use crate::types::{
-    DexConfig, RetryConfig, SwapProposal, TimeBasedThreshold, TransferDetails, VelocityConfig,
-    CrossVaultConfig, CrossVaultStatus, DexConfig, DisputeResolution, DisputeStatus, FeeStructure,
-    FeeTier, RetryConfig, SwapProposal, TimeBasedThreshold, TransferDetails, VaultAction,
+    DexConfig, FeeStructure, RetryConfig, SwapProposal, TimeBasedThreshold, TransferDetails,
     VelocityConfig,
 };
 use crate::{InitConfig, VaultDAO, VaultDAOClient};
@@ -27,7 +25,7 @@ fn default_init_config(
     InitConfig {
         signers,
         threshold,
-        quorum: 0, // disabled by default â€” existing tests are unaffected
+        quorum: 0, // disabled by default — existing tests are unaffected
         spending_limit: 1000,
         daily_limit: 5000,
         weekly_limit: 10000,
@@ -47,6 +45,8 @@ fn default_init_config(
         },
         recovery_config: crate::types::RecoveryConfig::default(_env),
         staking_config: types::StakingConfig::default(),
+        pre_execution_hooks: Vec::new(_env),
+        post_execution_hooks: Vec::new(_env),
     }
 }
 
@@ -97,6 +97,8 @@ fn test_multisig_approval() {
         },
         recovery_config: crate::types::RecoveryConfig::default(&env),
         staking_config: types::StakingConfig::default(),
+        pre_execution_hooks: Vec::new(&env),
+        post_execution_hooks: Vec::new(&env),
     };
     client.initialize(&admin, &config);
 
@@ -175,6 +177,8 @@ fn test_unauthorized_proposal() {
         },
         recovery_config: crate::types::RecoveryConfig::default(&env),
             staking_config: types::StakingConfig::default(),
+        pre_execution_hooks: Vec::new(&env),
+        post_execution_hooks: Vec::new(&env),
         };
     client.initialize(&admin, &config);
 
@@ -240,6 +244,8 @@ fn test_timelock_violation() {
         },
         recovery_config: crate::types::RecoveryConfig::default(&env),
             staking_config: types::StakingConfig::default(),
+        pre_execution_hooks: Vec::new(&env),
+        post_execution_hooks: Vec::new(&env),
         };
     client.initialize(&admin, &config);
     client.set_role(&admin, &signer1, &Role::Treasurer);
@@ -540,6 +546,8 @@ fn test_priority_levels() {
         },
         recovery_config: crate::types::RecoveryConfig::default(&env),
             staking_config: types::StakingConfig::default(),
+        pre_execution_hooks: Vec::new(&env),
+        post_execution_hooks: Vec::new(&env),
         };
     client.initialize(&admin, &config);
     client.set_role(&admin, &signer1, &Role::Treasurer);
@@ -642,6 +650,8 @@ fn test_get_proposals_by_priority() {
         },
         recovery_config: crate::types::RecoveryConfig::default(&env),
             staking_config: types::StakingConfig::default(),
+        pre_execution_hooks: Vec::new(&env),
+        post_execution_hooks: Vec::new(&env),
         };
     client.initialize(&admin, &config);
     client.set_role(&admin, &signer1, &Role::Treasurer);
@@ -722,6 +732,8 @@ fn test_change_priority_unauthorized() {
         },
         recovery_config: crate::types::RecoveryConfig::default(&env),
             staking_config: types::StakingConfig::default(),
+        pre_execution_hooks: Vec::new(&env),
+        post_execution_hooks: Vec::new(&env),
         };
     client.initialize(&admin, &config);
     client.set_role(&admin, &signer1, &Role::Treasurer);
@@ -785,6 +797,8 @@ fn test_comment_functionality() {
         },
         recovery_config: crate::types::RecoveryConfig::default(&env),
             staking_config: types::StakingConfig::default(),
+        pre_execution_hooks: Vec::new(&env),
+        post_execution_hooks: Vec::new(&env),
         };
     client.initialize(&admin, &config);
     client.set_role(&admin, &signer1, &Role::Treasurer);
@@ -874,6 +888,8 @@ fn test_blacklist_mode() {
         },
         recovery_config: crate::types::RecoveryConfig::default(&env),
             staking_config: types::StakingConfig::default(),
+        pre_execution_hooks: Vec::new(&env),
+        post_execution_hooks: Vec::new(&env),
         };
     client.initialize(&admin, &config);
     client.set_role(&admin, &treasurer, &Role::Treasurer);
@@ -956,6 +972,8 @@ fn test_abstention_does_not_count_toward_threshold() {
         },
         recovery_config: crate::types::RecoveryConfig::default(&env),
             staking_config: types::StakingConfig::default(),
+        pre_execution_hooks: Vec::new(&env),
+        post_execution_hooks: Vec::new(&env),
         };
     client.initialize(&admin, &config);
     client.set_role(&admin, &signer1, &Role::Treasurer);
@@ -974,12 +992,12 @@ fn test_abstention_does_not_count_toward_threshold() {
         &0i128,
     );
 
-    // Signer2 abstains â€” threshold still requires 2 approvals
+    // Signer2 abstains — threshold still requires 2 approvals
     client.abstain_from_proposal(&signer2, &proposal_id);
     let proposal = client.get_proposal(&proposal_id);
     assert_eq!(proposal.status, ProposalStatus::Pending);
 
-    // Only 1 approval â€” not enough even though signer2 abstained
+    // Only 1 approval — not enough even though signer2 abstained
     client.approve_proposal(&signer1, &proposal_id);
     let proposal = client.get_proposal(&proposal_id);
     assert_eq!(proposal.status, ProposalStatus::Pending);
@@ -1029,6 +1047,8 @@ fn test_list_management() {
         },
         recovery_config: crate::types::RecoveryConfig::default(&env),
             staking_config: types::StakingConfig::default(),
+        pre_execution_hooks: Vec::new(&env),
+        post_execution_hooks: Vec::new(&env),
         };
     client.initialize(&admin, &config);
 
@@ -1091,6 +1111,8 @@ fn test_cannot_abstain_after_voting() {
         },
         recovery_config: crate::types::RecoveryConfig::default(&env),
             staking_config: types::StakingConfig::default(),
+        pre_execution_hooks: Vec::new(&env),
+        post_execution_hooks: Vec::new(&env),
         };
     client.initialize(&admin, &config);
     client.set_role(&admin, &signer1, &Role::Treasurer);
@@ -1157,6 +1179,8 @@ fn test_cannot_abstain_twice() {
         },
         recovery_config: crate::types::RecoveryConfig::default(&env),
             staking_config: types::StakingConfig::default(),
+        pre_execution_hooks: Vec::new(&env),
+        post_execution_hooks: Vec::new(&env),
         };
     client.initialize(&admin, &config);
     client.set_role(&admin, &signer1, &Role::Treasurer);
@@ -1224,6 +1248,8 @@ fn test_velocity_limit_enforcement() {
         },
         recovery_config: crate::types::RecoveryConfig::default(&env),
             staking_config: types::StakingConfig::default(),
+        pre_execution_hooks: Vec::new(&env),
+        post_execution_hooks: Vec::new(&env),
         };
     client.initialize(&admin, &config);
     client.set_role(&admin, &signer, &Role::Treasurer);
@@ -1310,6 +1336,8 @@ fn test_verify_attachment() {
         },
         recovery_config: crate::types::RecoveryConfig::default(&env),
             staking_config: types::StakingConfig::default(),
+        pre_execution_hooks: Vec::new(&env),
+        post_execution_hooks: Vec::new(&env),
         };
     client.initialize(&admin, &config);
     client.set_role(&admin, &signer1, &Role::Treasurer);
@@ -1374,6 +1402,8 @@ fn test_remove_attachment() {
         },
         recovery_config: crate::types::RecoveryConfig::default(&env),
             staking_config: types::StakingConfig::default(),
+        pre_execution_hooks: Vec::new(&env),
+        post_execution_hooks: Vec::new(&env),
         };
     client.initialize(&admin, &config);
     client.set_role(&admin, &signer1, &Role::Treasurer);
@@ -1444,6 +1474,8 @@ fn test_attachment_unauthorized() {
         },
         recovery_config: crate::types::RecoveryConfig::default(&env),
             staking_config: types::StakingConfig::default(),
+        pre_execution_hooks: Vec::new(&env),
+        post_execution_hooks: Vec::new(&env),
         };
     client.initialize(&admin, &config);
     client.set_role(&admin, &signer1, &Role::Treasurer);
@@ -1511,6 +1543,8 @@ fn test_attachment_duplicate() {
         },
         recovery_config: crate::types::RecoveryConfig::default(&env),
             staking_config: types::StakingConfig::default(),
+        pre_execution_hooks: Vec::new(&env),
+        post_execution_hooks: Vec::new(&env),
         };
     client.initialize(&admin, &config);
     client.set_role(&admin, &signer1, &Role::Treasurer);
@@ -1578,6 +1612,8 @@ fn test_attachment_invalid_hash() {
         },
         recovery_config: crate::types::RecoveryConfig::default(&env),
             staking_config: types::StakingConfig::default(),
+        pre_execution_hooks: Vec::new(&env),
+        post_execution_hooks: Vec::new(&env),
         };
     client.initialize(&admin, &config);
     client.set_role(&admin, &signer1, &Role::Treasurer);
@@ -1642,6 +1678,8 @@ fn test_admin_can_add_attachment() {
         },
         recovery_config: crate::types::RecoveryConfig::default(&env),
             staking_config: types::StakingConfig::default(),
+        pre_execution_hooks: Vec::new(&env),
+        post_execution_hooks: Vec::new(&env),
         };
     client.initialize(&admin, &config);
     client.set_role(&admin, &signer1, &Role::Treasurer);
@@ -1706,6 +1744,8 @@ fn test_set_and_get_proposal_metadata() {
         },
         recovery_config: crate::types::RecoveryConfig::default(&env),
             staking_config: types::StakingConfig::default(),
+        pre_execution_hooks: Vec::new(&env),
+        post_execution_hooks: Vec::new(&env),
         };
     client.initialize(&admin, &config);
     client.set_role(&admin, &signer1, &Role::Treasurer);
@@ -1770,6 +1810,8 @@ fn test_remove_proposal_metadata() {
             window: 3600,
         },
         threshold_strategy: ThresholdStrategy::Fixed,
+        default_voting_deadline: 0,
+        veto_addresses: Vec::new(&env),
         retry_config: RetryConfig {
             enabled: false,
             max_retries: 0,
@@ -1777,6 +1819,8 @@ fn test_remove_proposal_metadata() {
         },
         recovery_config: crate::types::RecoveryConfig::default(&env),
             staking_config: types::StakingConfig::default(),
+        pre_execution_hooks: Vec::new(&env),
+        post_execution_hooks: Vec::new(&env),
         };
     client.initialize(&admin, &config);
     client.set_role(&admin, &signer1, &Role::Treasurer);
@@ -1840,6 +1884,8 @@ fn test_proposal_metadata_unauthorized() {
             window: 3600,
         },
         threshold_strategy: ThresholdStrategy::Fixed,
+        default_voting_deadline: 0,
+        veto_addresses: Vec::new(&env),
         retry_config: RetryConfig {
             enabled: false,
             max_retries: 0,
@@ -1847,6 +1893,8 @@ fn test_proposal_metadata_unauthorized() {
         },
         recovery_config: crate::types::RecoveryConfig::default(&env),
             staking_config: types::StakingConfig::default(),
+        pre_execution_hooks: Vec::new(&env),
+        post_execution_hooks: Vec::new(&env),
         };
     client.initialize(&admin, &config);
     client.set_role(&admin, &signer1, &Role::Treasurer);
@@ -2329,6 +2377,8 @@ fn test_fixed_threshold_strategy() {
         },
         recovery_config: crate::types::RecoveryConfig::default(&env),
             staking_config: types::StakingConfig::default(),
+        pre_execution_hooks: Vec::new(&env),
+        post_execution_hooks: Vec::new(&env),
         };
     client.initialize(&admin, &config);
     client.set_role(&admin, &signer1, &Role::Treasurer);
@@ -2403,6 +2453,8 @@ fn test_percentage_threshold_strategy() {
         },
         recovery_config: crate::types::RecoveryConfig::default(&env),
             staking_config: types::StakingConfig::default(),
+        pre_execution_hooks: Vec::new(&env),
+        post_execution_hooks: Vec::new(&env),
         };
     client.initialize(&admin, &config);
     client.set_role(&admin, &signer1, &Role::Treasurer);
@@ -2488,6 +2540,8 @@ fn test_time_based_threshold_strategy() {
         },
         recovery_config: crate::types::RecoveryConfig::default(&env),
             staking_config: types::StakingConfig::default(),
+        pre_execution_hooks: Vec::new(&env),
+        post_execution_hooks: Vec::new(&env),
         };
     client.initialize(&admin, &config);
     client.set_role(&admin, &signer1, &Role::Treasurer);
@@ -2563,6 +2617,8 @@ fn test_condition_balance_above() {
         },
         recovery_config: crate::types::RecoveryConfig::default(&env),
             staking_config: types::StakingConfig::default(),
+        pre_execution_hooks: Vec::new(&env),
+        post_execution_hooks: Vec::new(&env),
         };
     client.initialize(&admin, &config);
     client.set_role(&admin, &signer1, &Role::Treasurer);
@@ -2627,6 +2683,8 @@ fn test_condition_date_after() {
             window: 3600,
         },
         threshold_strategy: ThresholdStrategy::Fixed,
+        default_voting_deadline: 0,
+        veto_addresses: Vec::new(&env),
         retry_config: RetryConfig {
             enabled: false,
             max_retries: 0,
@@ -2634,6 +2692,8 @@ fn test_condition_date_after() {
         },
         recovery_config: crate::types::RecoveryConfig::default(&env),
             staking_config: types::StakingConfig::default(),
+        pre_execution_hooks: Vec::new(&env),
+        post_execution_hooks: Vec::new(&env),
         };
     client.initialize(&admin, &config);
     client.set_role(&admin, &signer1, &Role::Treasurer);
@@ -2709,6 +2769,8 @@ fn test_condition_multiple_and_logic() {
             window: 3600,
         },
         threshold_strategy: ThresholdStrategy::Fixed,
+        default_voting_deadline: 0,
+        veto_addresses: Vec::new(&env),
         retry_config: RetryConfig {
             enabled: false,
             max_retries: 0,
@@ -2716,6 +2778,8 @@ fn test_condition_multiple_and_logic() {
         },
         recovery_config: crate::types::RecoveryConfig::default(&env),
             staking_config: types::StakingConfig::default(),
+        pre_execution_hooks: Vec::new(&env),
+        post_execution_hooks: Vec::new(&env),
         };
     client.initialize(&admin, &config);
     client.set_role(&admin, &signer1, &Role::Treasurer);
@@ -2797,6 +2861,8 @@ fn test_condition_multiple_or_logic() {
             window: 3600,
         },
         threshold_strategy: ThresholdStrategy::Fixed,
+        default_voting_deadline: 0,
+        veto_addresses: Vec::new(&env),
         retry_config: RetryConfig {
             enabled: false,
             max_retries: 0,
@@ -2804,6 +2870,8 @@ fn test_condition_multiple_or_logic() {
         },
         recovery_config: crate::types::RecoveryConfig::default(&env),
             staking_config: types::StakingConfig::default(),
+        pre_execution_hooks: Vec::new(&env),
+        post_execution_hooks: Vec::new(&env),
         };
     client.initialize(&admin, &config);
     client.set_role(&admin, &signer1, &Role::Treasurer);
@@ -2878,6 +2946,8 @@ fn test_condition_no_conditions() {
             window: 3600,
         },
         threshold_strategy: ThresholdStrategy::Fixed,
+        default_voting_deadline: 0,
+        veto_addresses: Vec::new(&env),
         retry_config: RetryConfig {
             enabled: false,
             max_retries: 0,
@@ -2885,6 +2955,8 @@ fn test_condition_no_conditions() {
         },
         recovery_config: crate::types::RecoveryConfig::default(&env),
             staking_config: types::StakingConfig::default(),
+        pre_execution_hooks: Vec::new(&env),
+        post_execution_hooks: Vec::new(&env),
         };
     client.initialize(&admin, &config);
     client.set_role(&admin, &signer1, &Role::Treasurer);
@@ -2946,6 +3018,8 @@ fn test_dex_config_setup() {
             window: 3600,
         },
         threshold_strategy: ThresholdStrategy::Fixed,
+        default_voting_deadline: 0,
+        veto_addresses: Vec::new(&env),
         retry_config: RetryConfig {
             enabled: false,
             max_retries: 0,
@@ -2953,6 +3027,8 @@ fn test_dex_config_setup() {
         },
         recovery_config: crate::types::RecoveryConfig::default(&env),
             staking_config: types::StakingConfig::default(),
+        pre_execution_hooks: Vec::new(&env),
+        post_execution_hooks: Vec::new(&env),
         };
     client.initialize(&admin, &config);
 
@@ -3009,6 +3085,8 @@ fn test_swap_proposal_creation() {
             window: 3600,
         },
         threshold_strategy: ThresholdStrategy::Fixed,
+        default_voting_deadline: 0,
+        veto_addresses: Vec::new(&env),
         retry_config: RetryConfig {
             enabled: false,
             max_retries: 0,
@@ -3016,6 +3094,8 @@ fn test_swap_proposal_creation() {
         },
         recovery_config: crate::types::RecoveryConfig::default(&env),
             staking_config: types::StakingConfig::default(),
+        pre_execution_hooks: Vec::new(&env),
+        post_execution_hooks: Vec::new(&env),
         };
     client.initialize(&admin, &config);
     client.set_role(&admin, &treasurer, &Role::Treasurer);
@@ -3078,6 +3158,8 @@ fn test_dex_not_enabled_error() {
             window: 3600,
         },
         threshold_strategy: ThresholdStrategy::Fixed,
+        default_voting_deadline: 0,
+        veto_addresses: Vec::new(&env),
         retry_config: RetryConfig {
             enabled: false,
             max_retries: 0,
@@ -3085,6 +3167,8 @@ fn test_dex_not_enabled_error() {
         },
         recovery_config: crate::types::RecoveryConfig::default(&env),
             staking_config: types::StakingConfig::default(),
+        pre_execution_hooks: Vec::new(&env),
+        post_execution_hooks: Vec::new(&env),
         };
     client.initialize(&admin, &config);
     client.set_role(&admin, &treasurer, &Role::Treasurer);
@@ -3134,6 +3218,8 @@ fn test_batch_propose_multi_token() {
             window: 3600,
         },
         threshold_strategy: ThresholdStrategy::Fixed,
+        default_voting_deadline: 0,
+        veto_addresses: Vec::new(&env),
         retry_config: RetryConfig {
             enabled: false,
             max_retries: 0,
@@ -3141,6 +3227,8 @@ fn test_batch_propose_multi_token() {
         },
         recovery_config: crate::types::RecoveryConfig::default(&env),
             staking_config: types::StakingConfig::default(),
+        pre_execution_hooks: Vec::new(&env),
+        post_execution_hooks: Vec::new(&env),
         };
     client.initialize(&admin, &config);
     client.set_role(&admin, &treasurer, &Role::Treasurer);
@@ -3219,6 +3307,8 @@ fn test_batch_propose_exceeds_max_size() {
             window: 3600,
         },
         threshold_strategy: ThresholdStrategy::Fixed,
+        default_voting_deadline: 0,
+        veto_addresses: Vec::new(&env),
         retry_config: RetryConfig {
             enabled: false,
             max_retries: 0,
@@ -3226,6 +3316,8 @@ fn test_batch_propose_exceeds_max_size() {
         },
         recovery_config: crate::types::RecoveryConfig::default(&env),
             staking_config: types::StakingConfig::default(),
+        pre_execution_hooks: Vec::new(&env),
+        post_execution_hooks: Vec::new(&env),
         };
     client.initialize(&admin, &config);
     client.set_role(&admin, &treasurer, &Role::Treasurer);
@@ -3252,7 +3344,7 @@ fn test_batch_propose_exceeds_max_size() {
 }
 
 // ============================================================================
-// NEW TESTS â€” Abstention Votes & Quorum (Issue #117)
+// NEW TESTS — Abstention Votes & Quorum (Issue #117)
 // ============================================================================
 
 /// Quorum disabled (quorum=0): proposals approve on threshold alone, same as before.
@@ -3293,6 +3385,8 @@ fn test_quorum_disabled_behaves_like_fixed_threshold() {
             window: 3600,
         },
         threshold_strategy: ThresholdStrategy::Fixed,
+        default_voting_deadline: 0,
+        veto_addresses: Vec::new(&env),
         retry_config: RetryConfig {
             enabled: false,
             max_retries: 0,
@@ -3300,6 +3394,8 @@ fn test_quorum_disabled_behaves_like_fixed_threshold() {
         },
         recovery_config: crate::types::RecoveryConfig::default(&env),
             staking_config: types::StakingConfig::default(),
+        pre_execution_hooks: Vec::new(&env),
+        post_execution_hooks: Vec::new(&env),
         };
     client.initialize(&admin, &config);
     client.set_role(&admin, &signer1, &Role::Treasurer);
@@ -3316,7 +3412,7 @@ fn test_quorum_disabled_behaves_like_fixed_threshold() {
         &0i128,
     );
 
-    // Single approval satisfies threshold=1, quorum disabled â†’ Approved immediately
+    // Single approval satisfies threshold=1, quorum disabled ? Approved immediately
     client.approve_proposal(&signer1, &proposal_id);
     let proposal = client.get_proposal(&proposal_id);
     assert_eq!(proposal.status, ProposalStatus::Approved);
@@ -3324,8 +3420,8 @@ fn test_quorum_disabled_behaves_like_fixed_threshold() {
 
 /// Quorum blocks approval even when threshold is met.
 /// Setup: 4 signers, threshold=2, quorum=3.
-/// After 2 approvals, threshold is met but quorum (3) is not â†’ stays Pending.
-/// After a 3rd vote (abstention), quorum is reached â†’ transitions to Approved.
+/// After 2 approvals, threshold is met but quorum (3) is not ? stays Pending.
+/// After a 3rd vote (abstention), quorum is reached ? transitions to Approved.
 #[test]
 fn test_quorum_blocks_approval_until_satisfied() {
     let env = Env::default();
@@ -3367,6 +3463,7 @@ fn test_quorum_blocks_approval_until_satisfied() {
         },
         threshold_strategy: ThresholdStrategy::Fixed,
         default_voting_deadline: 0,
+        veto_addresses: Vec::new(&env),
         retry_config: RetryConfig {
             enabled: false,
             max_retries: 0,
@@ -3374,6 +3471,8 @@ fn test_quorum_blocks_approval_until_satisfied() {
         },
         recovery_config: crate::types::RecoveryConfig::default(&env),
             staking_config: types::StakingConfig::default(),
+        pre_execution_hooks: Vec::new(&env),
+        post_execution_hooks: Vec::new(&env),
         };
     client.initialize(&admin, &config);
     client.set_role(&admin, &signer1, &Role::Treasurer);
@@ -3392,7 +3491,7 @@ fn test_quorum_blocks_approval_until_satisfied() {
         &0i128,
     );
 
-    // 2 approvals â†’ threshold met, but quorum (3) not yet reached
+    // 2 approvals ? threshold met, but quorum (3) not yet reached
     client.approve_proposal(&signer1, &proposal_id);
     client.approve_proposal(&signer2, &proposal_id);
     let proposal = client.get_proposal(&proposal_id);
@@ -3402,7 +3501,7 @@ fn test_quorum_blocks_approval_until_satisfied() {
         "Should stay Pending: threshold met but quorum not yet (2 < 3)"
     );
 
-    // Abstention from signer3 pushes quorum_votes to 3 â†’ both threshold and quorum now satisfied
+    // Abstention from signer3 pushes quorum_votes to 3 ? both threshold and quorum now satisfied
     client.abstain_from_proposal(&signer3, &proposal_id);
     let proposal = client.get_proposal(&proposal_id);
     assert_eq!(
@@ -3446,7 +3545,7 @@ fn test_abstentions_count_toward_quorum_but_not_threshold() {
     signers.push_back(signer3.clone());
     signers.push_back(signer4.clone());
 
-    // threshold=3, quorum=2 â€” quorum is easy to satisfy
+    // threshold=3, quorum=2 — quorum is easy to satisfy
     let config = InitConfig {
         signers,
         threshold: 3,
@@ -3462,6 +3561,7 @@ fn test_abstentions_count_toward_quorum_but_not_threshold() {
         },
         threshold_strategy: ThresholdStrategy::Fixed,
         default_voting_deadline: 0,
+        veto_addresses: Vec::new(&env),
         retry_config: RetryConfig {
             enabled: false,
             max_retries: 0,
@@ -3469,6 +3569,8 @@ fn test_abstentions_count_toward_quorum_but_not_threshold() {
         },
         recovery_config: crate::types::RecoveryConfig::default(&env),
             staking_config: types::StakingConfig::default(),
+        pre_execution_hooks: Vec::new(&env),
+        post_execution_hooks: Vec::new(&env),
         };
     client.initialize(&admin, &config);
     client.set_role(&admin, &signer1, &Role::Treasurer);
@@ -3557,6 +3659,7 @@ fn test_get_quorum_status() {
         },
         threshold_strategy: ThresholdStrategy::Fixed,
         default_voting_deadline: 0,
+        veto_addresses: Vec::new(&env),
         retry_config: RetryConfig {
             enabled: false,
             max_retries: 0,
@@ -3564,6 +3667,8 @@ fn test_get_quorum_status() {
         },
         recovery_config: crate::types::RecoveryConfig::default(&env),
             staking_config: types::StakingConfig::default(),
+        pre_execution_hooks: Vec::new(&env),
+        post_execution_hooks: Vec::new(&env),
         };
     client.initialize(&admin, &config);
     client.set_role(&admin, &signer1, &Role::Treasurer);
@@ -3639,6 +3744,7 @@ fn test_get_quorum_status_quorum_disabled() {
         },
         threshold_strategy: ThresholdStrategy::Fixed,
         default_voting_deadline: 0,
+        veto_addresses: Vec::new(&env),
         retry_config: RetryConfig {
             enabled: false,
             max_retries: 0,
@@ -3646,6 +3752,8 @@ fn test_get_quorum_status_quorum_disabled() {
         },
         recovery_config: crate::types::RecoveryConfig::default(&env),
             staking_config: types::StakingConfig::default(),
+        pre_execution_hooks: Vec::new(&env),
+        post_execution_hooks: Vec::new(&env),
         };
     client.initialize(&admin, &config);
     client.set_role(&admin, &signer1, &Role::Treasurer);
@@ -3699,6 +3807,8 @@ fn test_update_quorum() {
             window: 3600,
         },
         threshold_strategy: ThresholdStrategy::Fixed,
+        default_voting_deadline: 0,
+        veto_addresses: Vec::new(&env),
         retry_config: RetryConfig {
             enabled: false,
             max_retries: 0,
@@ -3706,6 +3816,8 @@ fn test_update_quorum() {
         },
         recovery_config: crate::types::RecoveryConfig::default(&env),
             staking_config: types::StakingConfig::default(),
+        pre_execution_hooks: Vec::new(&env),
+        post_execution_hooks: Vec::new(&env),
         };
     client.initialize(&admin, &config);
 
@@ -3760,6 +3872,8 @@ fn test_execution_rechecks_quorum_requirement() {
             window: 3600,
         },
         threshold_strategy: ThresholdStrategy::Fixed,
+        default_voting_deadline: 0,
+        veto_addresses: Vec::new(&env),
         retry_config: RetryConfig {
             enabled: false,
             max_retries: 0,
@@ -3767,6 +3881,8 @@ fn test_execution_rechecks_quorum_requirement() {
         },
         recovery_config: crate::types::RecoveryConfig::default(&env),
             staking_config: types::StakingConfig::default(),
+        pre_execution_hooks: Vec::new(&env),
+        post_execution_hooks: Vec::new(&env),
         };
     client.initialize(&admin, &config);
     client.set_role(&admin, &signer1, &Role::Treasurer);
@@ -3834,6 +3950,8 @@ fn test_batch_execution_rechecks_quorum_requirement() {
             window: 3600,
         },
         threshold_strategy: ThresholdStrategy::Fixed,
+        default_voting_deadline: 0,
+        veto_addresses: Vec::new(&env),
         retry_config: RetryConfig {
             enabled: false,
             max_retries: 0,
@@ -3841,6 +3959,8 @@ fn test_batch_execution_rechecks_quorum_requirement() {
         },
         recovery_config: crate::types::RecoveryConfig::default(&env),
             staking_config: types::StakingConfig::default(),
+        pre_execution_hooks: Vec::new(&env),
+        post_execution_hooks: Vec::new(&env),
         };
     client.initialize(&admin, &config);
     client.set_role(&admin, &signer1, &Role::Treasurer);
@@ -3898,7 +4018,7 @@ fn test_quorum_satisfied_by_approvals_alone() {
     signers.push_back(signer1.clone());
     signers.push_back(signer2.clone());
 
-    // threshold=2, quorum=2 â€” two approvals should satisfy both
+    // threshold=2, quorum=2 — two approvals should satisfy both
     let config = InitConfig {
         signers,
         threshold: 2,
@@ -3914,6 +4034,7 @@ fn test_quorum_satisfied_by_approvals_alone() {
         },
         threshold_strategy: ThresholdStrategy::Fixed,
         default_voting_deadline: 0,
+        veto_addresses: Vec::new(&env),
         retry_config: RetryConfig {
             enabled: false,
             max_retries: 0,
@@ -3921,6 +4042,8 @@ fn test_quorum_satisfied_by_approvals_alone() {
         },
         recovery_config: crate::types::RecoveryConfig::default(&env),
             staking_config: types::StakingConfig::default(),
+        pre_execution_hooks: Vec::new(&env),
+        post_execution_hooks: Vec::new(&env),
         };
     client.initialize(&admin, &config);
     client.set_role(&admin, &signer1, &Role::Treasurer);
@@ -3944,7 +4067,7 @@ fn test_quorum_satisfied_by_approvals_alone() {
 
     client.approve_proposal(&signer2, &proposal_id);
     let proposal = client.get_proposal(&proposal_id);
-    // 2 approvals = threshold AND 2 total votes = quorum â†’ Approved
+    // 2 approvals = threshold AND 2 total votes = quorum ? Approved
     assert_eq!(proposal.status, ProposalStatus::Approved);
 }
 
@@ -3964,7 +4087,7 @@ fn test_initialize_rejects_quorum_too_high() {
     signers.push_back(admin.clone());
     signers.push_back(signer1.clone());
 
-    // quorum=3 but only 2 signers â€” should fail
+    // quorum=3 but only 2 signers — should fail
     let config = InitConfig {
         signers,
         threshold: 1,
@@ -3980,6 +4103,7 @@ fn test_initialize_rejects_quorum_too_high() {
         },
         threshold_strategy: ThresholdStrategy::Fixed,
         default_voting_deadline: 0,
+        veto_addresses: Vec::new(&env),
         retry_config: RetryConfig {
             enabled: false,
             max_retries: 0,
@@ -3987,6 +4111,8 @@ fn test_initialize_rejects_quorum_too_high() {
         },
         recovery_config: crate::types::RecoveryConfig::default(&env),
             staking_config: types::StakingConfig::default(),
+        pre_execution_hooks: Vec::new(&env),
+        post_execution_hooks: Vec::new(&env),
         };
 
     let result = client.try_initialize(&admin, &config);
@@ -4036,6 +4162,7 @@ macro_rules! setup_retry_test {
             },
             threshold_strategy: ThresholdStrategy::Fixed,
             default_voting_deadline: 0,
+            veto_addresses: Vec::new(&$env),
             retry_config: RetryConfig {
                 enabled: true,
                 max_retries: 3,
@@ -4043,6 +4170,8 @@ macro_rules! setup_retry_test {
             },
             recovery_config: crate::types::RecoveryConfig::default(&$env),
                 staking_config: types::StakingConfig::default(),
+            pre_execution_hooks: Vec::new(&$env),
+            post_execution_hooks: Vec::new(&$env),
             };
 
         $client.initialize(&$admin, &config);
@@ -4057,7 +4186,7 @@ macro_rules! setup_retry_test {
 fn test_retry_schedules_on_retryable_failure() {
     setup_retry_test!(env, client, admin, _signer1, token_addr, _contract_id);
 
-    // Propose transfer of 1000 but vault only has 500 â†’ InsufficientBalance (retryable)
+    // Propose transfer of 1000 but vault only has 500 ? InsufficientBalance (retryable)
     let recipient = Address::generate(&env);
     let proposal_id = client.propose_transfer(
         &admin,
@@ -4074,7 +4203,7 @@ fn test_retry_schedules_on_retryable_failure() {
     // Approve to reach threshold
     client.approve_proposal(&admin, &proposal_id);
 
-    // Execute â€” should schedule retry (returns Ok) instead of failing
+    // Execute — should schedule retry (returns Ok) instead of failing
     let result = client.try_execute_proposal(&admin, &proposal_id);
     assert!(result.is_ok(), "Expected Ok when retry is scheduled");
 
@@ -4105,10 +4234,10 @@ fn test_retry_backoff_enforced() {
 
     client.approve_proposal(&admin, &proposal_id);
 
-    // First execution â€” schedules retry
+    // First execution — schedules retry
     client.execute_proposal(&admin, &proposal_id);
 
-    // Try again immediately â€” should fail with RetryError
+    // Try again immediately — should fail with RetryError
     let result = client.try_execute_proposal(&admin, &proposal_id);
     assert_eq!(result.err(), Some(Ok(VaultError::RetryError)));
 }
@@ -4141,7 +4270,7 @@ fn test_retry_max_retries_exhausted() {
         client.execute_proposal(&admin, &proposal_id);
     }
 
-    // 4th attempt â€” max retries exhausted
+    // 4th attempt — max retries exhausted
     env.ledger().with_mut(|li| {
         li.sequence_number += 100;
     });
@@ -4168,13 +4297,13 @@ fn test_retry_exponential_backoff_increases() {
 
     client.approve_proposal(&admin, &proposal_id);
 
-    // First retry â€” backoff = 10
+    // First retry — backoff = 10
     client.execute_proposal(&admin, &proposal_id);
     let state1 = client.get_retry_state(&proposal_id).unwrap();
     let backoff1 = state1.next_retry_ledger - state1.last_retry_ledger;
     assert_eq!(backoff1, 10);
 
-    // Advance and trigger second retry â€” backoff = 20
+    // Advance and trigger second retry — backoff = 20
     env.ledger().with_mut(|li| {
         li.sequence_number += 11;
     });
@@ -4183,7 +4312,7 @@ fn test_retry_exponential_backoff_increases() {
     let backoff2 = state2.next_retry_ledger - state2.last_retry_ledger;
     assert_eq!(backoff2, 20);
 
-    // Advance and trigger third retry â€” backoff = 40
+    // Advance and trigger third retry — backoff = 40
     env.ledger().with_mut(|li| {
         li.sequence_number += 21;
     });
@@ -4229,6 +4358,7 @@ fn test_retry_not_enabled_passes_through_error() {
         },
         threshold_strategy: ThresholdStrategy::Fixed,
         default_voting_deadline: 0,
+        veto_addresses: Vec::new(&env),
         retry_config: RetryConfig {
             enabled: false,
             max_retries: 0,
@@ -4236,6 +4366,8 @@ fn test_retry_not_enabled_passes_through_error() {
         },
         recovery_config: crate::types::RecoveryConfig::default(&env),
             staking_config: types::StakingConfig::default(),
+        pre_execution_hooks: Vec::new(&env),
+        post_execution_hooks: Vec::new(&env),
         };
 
     client.initialize(&admin, &config);
@@ -4282,7 +4414,7 @@ fn test_retry_execution_function() {
 
     client.approve_proposal(&admin, &proposal_id);
 
-    // Trigger initial failure â†’ schedules retry
+    // Trigger initial failure ? schedules retry
     client.execute_proposal(&admin, &proposal_id);
 
     // Advance past backoff
@@ -4332,6 +4464,7 @@ fn test_retry_disabled_rejects_retry_execution() {
         },
         threshold_strategy: ThresholdStrategy::Fixed,
         default_voting_deadline: 0,
+        veto_addresses: Vec::new(&env),
         retry_config: RetryConfig {
             enabled: false,
             max_retries: 0,
@@ -4339,6 +4472,8 @@ fn test_retry_disabled_rejects_retry_execution() {
         },
         recovery_config: crate::types::RecoveryConfig::default(&env),
             staking_config: types::StakingConfig::default(),
+        pre_execution_hooks: Vec::new(&env),
+        post_execution_hooks: Vec::new(&env),
         };
 
     client.initialize(&admin, &config);
@@ -4369,7 +4504,7 @@ fn test_retry_succeeds_after_balance_funded() {
 
     client.approve_proposal(&admin, &proposal_id);
 
-    // First attempt fails â€” insufficient balance (vault has 500, need 1000)
+    // First attempt fails — insufficient balance (vault has 500, need 1000)
     client.execute_proposal(&admin, &proposal_id);
 
     // Fund the vault with enough tokens
@@ -4760,6 +4895,7 @@ fn test_cross_vault_multi_vault_actions() {
         },
         threshold_strategy: ThresholdStrategy::Fixed,
         default_voting_deadline: 0,
+        veto_addresses: Vec::new(&env),
         retry_config: RetryConfig {
             enabled: false,
             max_retries: 0,
@@ -4767,6 +4903,8 @@ fn test_cross_vault_multi_vault_actions() {
         },
         recovery_config: crate::types::RecoveryConfig::default(&env),
             staking_config: types::StakingConfig::default(),
+        pre_execution_hooks: Vec::new(&env),
+        post_execution_hooks: Vec::new(&env),
         };
 
     // Initialize all vaults
@@ -5251,6 +5389,7 @@ fn test_reputation_initialized_at_neutral() {
         },
         threshold_strategy: ThresholdStrategy::Fixed,
         default_voting_deadline: 0,
+        veto_addresses: Vec::new(&env),
         retry_config: RetryConfig {
             enabled: false,
             max_retries: 0,
@@ -5258,6 +5397,8 @@ fn test_reputation_initialized_at_neutral() {
         },
         recovery_config: crate::types::RecoveryConfig::default(&env),
             staking_config: types::StakingConfig::default(),
+        pre_execution_hooks: Vec::new(&env),
+        post_execution_hooks: Vec::new(&env),
         };
     client.initialize(&admin, &config);
     client.set_role(&admin, &proposer, &Role::Treasurer);
@@ -5309,6 +5450,7 @@ fn test_reputation_increases_on_proposal_creation() {
         },
         threshold_strategy: ThresholdStrategy::Fixed,
         default_voting_deadline: 0,
+        veto_addresses: Vec::new(&env),
         retry_config: RetryConfig {
             enabled: false,
             max_retries: 0,
@@ -5316,6 +5458,8 @@ fn test_reputation_increases_on_proposal_creation() {
         },
         recovery_config: crate::types::RecoveryConfig::default(&env),
             staking_config: types::StakingConfig::default(),
+        pre_execution_hooks: Vec::new(&env),
+        post_execution_hooks: Vec::new(&env),
         };
     client.initialize(&admin, &config);
     client.set_role(&admin, &proposer, &Role::Treasurer);
@@ -5377,6 +5521,7 @@ fn test_reputation_increases_on_approval() {
         },
         threshold_strategy: ThresholdStrategy::Fixed,
         default_voting_deadline: 0,
+        veto_addresses: Vec::new(&env),
         retry_config: RetryConfig {
             enabled: false,
             max_retries: 0,
@@ -5384,6 +5529,8 @@ fn test_reputation_increases_on_approval() {
         },
         recovery_config: crate::types::RecoveryConfig::default(&env),
             staking_config: types::StakingConfig::default(),
+        pre_execution_hooks: Vec::new(&env),
+        post_execution_hooks: Vec::new(&env),
         };
     client.initialize(&admin, &config);
     client.set_role(&admin, &proposer, &Role::Treasurer);
@@ -5450,6 +5597,7 @@ fn test_participation_tracking_on_abstention() {
         },
         threshold_strategy: ThresholdStrategy::Fixed,
         default_voting_deadline: 0,
+        veto_addresses: Vec::new(&env),
         retry_config: RetryConfig {
             enabled: false,
             max_retries: 0,
@@ -5457,6 +5605,8 @@ fn test_participation_tracking_on_abstention() {
         },
         recovery_config: crate::types::RecoveryConfig::default(&env),
             staking_config: types::StakingConfig::default(),
+        pre_execution_hooks: Vec::new(&env),
+        post_execution_hooks: Vec::new(&env),
         };
     client.initialize(&admin, &config);
 
@@ -5519,6 +5669,7 @@ fn test_reputation_increases_on_execution() {
         },
         threshold_strategy: ThresholdStrategy::Fixed,
         default_voting_deadline: 0,
+        veto_addresses: Vec::new(&env),
         retry_config: RetryConfig {
             enabled: false,
             max_retries: 0,
@@ -5526,6 +5677,8 @@ fn test_reputation_increases_on_execution() {
         },
         recovery_config: crate::types::RecoveryConfig::default(&env),
             staking_config: types::StakingConfig::default(),
+        pre_execution_hooks: Vec::new(&env),
+        post_execution_hooks: Vec::new(&env),
         };
     client.initialize(&admin, &config);
     client.set_role(&admin, &proposer, &Role::Treasurer);
@@ -5592,6 +5745,7 @@ fn test_reputation_decreases_on_rejection() {
         },
         threshold_strategy: ThresholdStrategy::Fixed,
         default_voting_deadline: 0,
+        veto_addresses: Vec::new(&env),
         retry_config: RetryConfig {
             enabled: false,
             max_retries: 0,
@@ -5599,6 +5753,8 @@ fn test_reputation_decreases_on_rejection() {
         },
         recovery_config: crate::types::RecoveryConfig::default(&env),
             staking_config: types::StakingConfig::default(),
+        pre_execution_hooks: Vec::new(&env),
+        post_execution_hooks: Vec::new(&env),
         };
     client.initialize(&admin, &config);
     client.set_role(&admin, &proposer, &Role::Treasurer);
@@ -5663,6 +5819,7 @@ fn test_reputation_decay_over_time() {
         },
         threshold_strategy: ThresholdStrategy::Fixed,
         default_voting_deadline: 0,
+        veto_addresses: Vec::new(&env),
         retry_config: RetryConfig {
             enabled: false,
             max_retries: 0,
@@ -5670,6 +5827,8 @@ fn test_reputation_decay_over_time() {
         },
         recovery_config: crate::types::RecoveryConfig::default(&env),
             staking_config: types::StakingConfig::default(),
+        pre_execution_hooks: Vec::new(&env),
+        post_execution_hooks: Vec::new(&env),
         };
     client.initialize(&admin, &config);
     client.set_role(&admin, &proposer, &Role::Treasurer);
@@ -5753,6 +5912,7 @@ fn test_create_from_template_with_overrides() {
         },
         threshold_strategy: ThresholdStrategy::Fixed,
         default_voting_deadline: 0,
+        veto_addresses: Vec::new(&env),
         retry_config: RetryConfig {
             enabled: false,
             max_retries: 0,
@@ -5760,6 +5920,8 @@ fn test_create_from_template_with_overrides() {
         },
         recovery_config: crate::types::RecoveryConfig::default(&env),
             staking_config: types::StakingConfig::default(),
+        pre_execution_hooks: Vec::new(&env),
+        post_execution_hooks: Vec::new(&env),
         };
     client.initialize(&admin, &config);
     client.set_role(&admin, &treasurer, &Role::Treasurer);
@@ -5835,6 +5997,7 @@ fn test_create_from_template_amount_out_of_range() {
         },
         threshold_strategy: ThresholdStrategy::Fixed,
         default_voting_deadline: 0,
+        veto_addresses: Vec::new(&env),
         retry_config: RetryConfig {
             enabled: false,
             max_retries: 0,
@@ -5842,6 +6005,8 @@ fn test_create_from_template_amount_out_of_range() {
         },
         recovery_config: crate::types::RecoveryConfig::default(&env),
             staking_config: types::StakingConfig::default(),
+        pre_execution_hooks: Vec::new(&env),
+        post_execution_hooks: Vec::new(&env),
         };
     client.initialize(&admin, &config);
     client.set_role(&admin, &treasurer, &Role::Treasurer);
@@ -5922,6 +6087,7 @@ fn test_create_from_inactive_template() {
         },
         threshold_strategy: ThresholdStrategy::Fixed,
         default_voting_deadline: 0,
+        veto_addresses: Vec::new(&env),
         retry_config: RetryConfig {
             enabled: false,
             max_retries: 0,
@@ -5929,6 +6095,8 @@ fn test_create_from_inactive_template() {
         },
         recovery_config: crate::types::RecoveryConfig::default(&env),
             staking_config: types::StakingConfig::default(),
+        pre_execution_hooks: Vec::new(&env),
+        post_execution_hooks: Vec::new(&env),
         };
 
     client.initialize(&admin, &config);
@@ -6002,6 +6170,7 @@ fn test_reputation_based_spending_limit() {
         },
         threshold_strategy: ThresholdStrategy::Fixed,
         default_voting_deadline: 0,
+        veto_addresses: Vec::new(&env),
         retry_config: RetryConfig {
             enabled: false,
             max_retries: 0,
@@ -6009,6 +6178,8 @@ fn test_reputation_based_spending_limit() {
         },
         recovery_config: crate::types::RecoveryConfig::default(&env),
             staking_config: types::StakingConfig::default(),
+        pre_execution_hooks: Vec::new(&env),
+        post_execution_hooks: Vec::new(&env),
         };
     client.initialize(&admin, &config);
     client.set_role(&admin, &proposer, &Role::Treasurer);
@@ -6081,6 +6252,7 @@ fn test_reputation_high_score_get_limits_boost() {
         },
         threshold_strategy: ThresholdStrategy::Fixed,
         default_voting_deadline: 0,
+        veto_addresses: Vec::new(&env),
         retry_config: RetryConfig {
             enabled: false,
             max_retries: 0,
@@ -6088,6 +6260,8 @@ fn test_reputation_high_score_get_limits_boost() {
         },
         recovery_config: crate::types::RecoveryConfig::default(&env),
             staking_config: types::StakingConfig::default(),
+        pre_execution_hooks: Vec::new(&env),
+        post_execution_hooks: Vec::new(&env),
         };
     client.initialize(&admin, &config);
     client.set_role(&admin, &treasurer, &Role::Treasurer);
@@ -6150,6 +6324,7 @@ fn test_template_not_found() {
         },
         threshold_strategy: ThresholdStrategy::Fixed,
         default_voting_deadline: 0,
+        veto_addresses: Vec::new(&env),
         retry_config: RetryConfig {
             enabled: false,
             max_retries: 0,
@@ -6157,6 +6332,8 @@ fn test_template_not_found() {
         },
         recovery_config: crate::types::RecoveryConfig::default(&env),
             staking_config: types::StakingConfig::default(),
+        pre_execution_hooks: Vec::new(&env),
+        post_execution_hooks: Vec::new(&env),
         };
     client.initialize(&admin, &config);
 
@@ -6221,6 +6398,7 @@ fn test_retry_not_enabled() {
         },
         threshold_strategy: ThresholdStrategy::Fixed,
         default_voting_deadline: 0,
+        veto_addresses: Vec::new(&env),
         retry_config: RetryConfig {
             enabled: false,
             max_retries: 0,
@@ -6228,6 +6406,8 @@ fn test_retry_not_enabled() {
         },
         recovery_config: crate::types::RecoveryConfig::default(&env),
             staking_config: types::StakingConfig::default(),
+        pre_execution_hooks: Vec::new(&env),
+        post_execution_hooks: Vec::new(&env),
         };
     client.initialize(&admin, &config);
     client.set_role(&admin, &proposer, &Role::Treasurer);
@@ -6431,6 +6611,7 @@ fn test_insurance_posting_and_refund() {
         },
         threshold_strategy: ThresholdStrategy::Fixed,
         default_voting_deadline: 0,
+        veto_addresses: Vec::new(&env),
         retry_config: RetryConfig {
             enabled: false,
             max_retries: 0,
@@ -6438,6 +6619,8 @@ fn test_insurance_posting_and_refund() {
         },
         recovery_config: crate::types::RecoveryConfig::default(&env),
             staking_config: types::StakingConfig::default(),
+        pre_execution_hooks: Vec::new(&env),
+        post_execution_hooks: Vec::new(&env),
         };
     client.initialize(&admin, &config);
     client.set_role(&admin, &proposer, &Role::Treasurer);
@@ -6533,6 +6716,7 @@ fn test_insurance_slashing_on_rejection() {
         },
         threshold_strategy: ThresholdStrategy::Fixed,
         default_voting_deadline: 0,
+        veto_addresses: Vec::new(&env),
         retry_config: RetryConfig {
             enabled: false,
             max_retries: 0,
@@ -6540,6 +6724,8 @@ fn test_insurance_slashing_on_rejection() {
         },
         recovery_config: crate::types::RecoveryConfig::default(&env),
             staking_config: types::StakingConfig::default(),
+        pre_execution_hooks: Vec::new(&env),
+        post_execution_hooks: Vec::new(&env),
         };
     client.initialize(&admin, &config);
     client.set_role(&admin, &proposer, &Role::Treasurer);
@@ -6623,6 +6809,7 @@ fn test_insurance_pool_withdrawal() {
         },
         threshold_strategy: ThresholdStrategy::Fixed,
         default_voting_deadline: 0,
+        veto_addresses: Vec::new(&env),
         retry_config: RetryConfig {
             enabled: false,
             max_retries: 0,
@@ -6630,6 +6817,8 @@ fn test_insurance_pool_withdrawal() {
         },
         recovery_config: crate::types::RecoveryConfig::default(&env),
             staking_config: types::StakingConfig::default(),
+        pre_execution_hooks: Vec::new(&env),
+        post_execution_hooks: Vec::new(&env),
         };
     client.initialize(&admin, &config);
     client.set_role(&admin, &proposer, &Role::Treasurer);

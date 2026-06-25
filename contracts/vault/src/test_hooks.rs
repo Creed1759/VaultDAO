@@ -1,12 +1,46 @@
 #![cfg(test)]
 
 use super::*;
-use crate::types::{ThresholdStrategy, VelocityConfig};
+use crate::types::{RetryConfig, ThresholdStrategy, VelocityConfig};
 use crate::{InitConfig, VaultDAO, VaultDAOClient};
 use soroban_sdk::{
     testutils::{Address as _, Ledger},
     Env, Symbol, Vec,
 };
+
+fn make_hooks_config(
+    env: &Env,
+    signers: Vec<Address>,
+    pre_hooks: Vec<Address>,
+    post_hooks: Vec<Address>,
+) -> InitConfig {
+    InitConfig {
+        signers,
+        threshold: 1,
+        quorum: 0,
+        spending_limit: 1000,
+        daily_limit: 5000,
+        weekly_limit: 10000,
+        timelock_threshold: 500,
+        timelock_delay: 100,
+        velocity_limit: VelocityConfig {
+            limit: 100,
+            window: 3600,
+        },
+        threshold_strategy: ThresholdStrategy::Fixed,
+        default_voting_deadline: 0,
+        veto_addresses: Vec::new(env),
+        retry_config: RetryConfig {
+            enabled: false,
+            max_retries: 0,
+            initial_backoff_ledgers: 0,
+        },
+        recovery_config: crate::types::RecoveryConfig::default(env),
+        staking_config: types::StakingConfig::default(),
+        pre_execution_hooks: pre_hooks,
+        post_execution_hooks: post_hooks,
+    }
+}
 
 #[test]
 fn test_register_pre_hook() {
@@ -22,28 +56,10 @@ fn test_register_pre_hook() {
     let mut signers = Vec::new(&env);
     signers.push_back(admin.clone());
 
-    let config = InitConfig {
-        signers,
-        threshold: 1,
-        quorum: 0,
-        spending_limit: 1000,
-        daily_limit: 5000,
-        weekly_limit: 10000,
-        timelock_threshold: 500,
-        timelock_delay: 100,
-        velocity_limit: VelocityConfig {
-            limit: 100,
-            window: 3600,
-        },
-        threshold_strategy: ThresholdStrategy::Fixed,
-        pre_execution_hooks: Vec::new(&env),
-        post_execution_hooks: Vec::new(&env),
-    };
-    
+    let config = make_hooks_config(&env, signers, Vec::new(&env), Vec::new(&env));
     client.initialize(&admin, &config);
     client.register_pre_hook(&admin, &hook);
-    
-    // Verify hook was added (would need getter function in real implementation)
+    // Hook registered successfully (no error = pass)
 }
 
 #[test]
@@ -60,24 +76,7 @@ fn test_register_post_hook() {
     let mut signers = Vec::new(&env);
     signers.push_back(admin.clone());
 
-    let config = InitConfig {
-        signers,
-        threshold: 1,
-        quorum: 0,
-        spending_limit: 1000,
-        daily_limit: 5000,
-        weekly_limit: 10000,
-        timelock_threshold: 500,
-        timelock_delay: 100,
-        velocity_limit: VelocityConfig {
-            limit: 100,
-            window: 3600,
-        },
-        threshold_strategy: ThresholdStrategy::Fixed,
-        pre_execution_hooks: Vec::new(&env),
-        post_execution_hooks: Vec::new(&env),
-    };
-    
+    let config = make_hooks_config(&env, signers, Vec::new(&env), Vec::new(&env));
     client.initialize(&admin, &config);
     client.register_post_hook(&admin, &hook);
 }
@@ -96,24 +95,7 @@ fn test_remove_pre_hook() {
     let mut signers = Vec::new(&env);
     signers.push_back(admin.clone());
 
-    let config = InitConfig {
-        signers,
-        threshold: 1,
-        quorum: 0,
-        spending_limit: 1000,
-        daily_limit: 5000,
-        weekly_limit: 10000,
-        timelock_threshold: 500,
-        timelock_delay: 100,
-        velocity_limit: VelocityConfig {
-            limit: 100,
-            window: 3600,
-        },
-        threshold_strategy: ThresholdStrategy::Fixed,
-        pre_execution_hooks: Vec::new(&env),
-        post_execution_hooks: Vec::new(&env),
-    };
-    
+    let config = make_hooks_config(&env, signers, Vec::new(&env), Vec::new(&env));
     client.initialize(&admin, &config);
     client.register_pre_hook(&admin, &hook);
     client.remove_pre_hook(&admin, &hook);
@@ -133,24 +115,7 @@ fn test_remove_post_hook() {
     let mut signers = Vec::new(&env);
     signers.push_back(admin.clone());
 
-    let config = InitConfig {
-        signers,
-        threshold: 1,
-        quorum: 0,
-        spending_limit: 1000,
-        daily_limit: 5000,
-        weekly_limit: 10000,
-        timelock_threshold: 500,
-        timelock_delay: 100,
-        velocity_limit: VelocityConfig {
-            limit: 100,
-            window: 3600,
-        },
-        threshold_strategy: ThresholdStrategy::Fixed,
-        pre_execution_hooks: Vec::new(&env),
-        post_execution_hooks: Vec::new(&env),
-    };
-    
+    let config = make_hooks_config(&env, signers, Vec::new(&env), Vec::new(&env));
     client.initialize(&admin, &config);
     client.register_post_hook(&admin, &hook);
     client.remove_post_hook(&admin, &hook);
@@ -171,26 +136,9 @@ fn test_hook_unauthorized() {
     let mut signers = Vec::new(&env);
     signers.push_back(admin.clone());
 
-    let config = InitConfig {
-        signers,
-        threshold: 1,
-        quorum: 0,
-        spending_limit: 1000,
-        daily_limit: 5000,
-        weekly_limit: 10000,
-        timelock_threshold: 500,
-        timelock_delay: 100,
-        velocity_limit: VelocityConfig {
-            limit: 100,
-            window: 3600,
-        },
-        threshold_strategy: ThresholdStrategy::Fixed,
-        pre_execution_hooks: Vec::new(&env),
-        post_execution_hooks: Vec::new(&env),
-    };
-    
+    let config = make_hooks_config(&env, signers, Vec::new(&env), Vec::new(&env));
     client.initialize(&admin, &config);
-    
+
     let res = client.try_register_pre_hook(&user, &hook);
     assert_eq!(res.err(), Some(Ok(VaultError::Unauthorized)));
 }
@@ -209,27 +157,10 @@ fn test_duplicate_hook() {
     let mut signers = Vec::new(&env);
     signers.push_back(admin.clone());
 
-    let config = InitConfig {
-        signers,
-        threshold: 1,
-        quorum: 0,
-        spending_limit: 1000,
-        daily_limit: 5000,
-        weekly_limit: 10000,
-        timelock_threshold: 500,
-        timelock_delay: 100,
-        velocity_limit: VelocityConfig {
-            limit: 100,
-            window: 3600,
-        },
-        threshold_strategy: ThresholdStrategy::Fixed,
-        pre_execution_hooks: Vec::new(&env),
-        post_execution_hooks: Vec::new(&env),
-    };
-    
+    let config = make_hooks_config(&env, signers, Vec::new(&env), Vec::new(&env));
     client.initialize(&admin, &config);
     client.register_pre_hook(&admin, &hook);
-    
+
     let res = client.try_register_pre_hook(&admin, &hook);
     assert_eq!(res.err(), Some(Ok(VaultError::SignerAlreadyExists)));
 }
@@ -255,23 +186,7 @@ fn test_hooks_with_initialization() {
     let mut post_hooks = Vec::new(&env);
     post_hooks.push_back(post_hook.clone());
 
-    let config = InitConfig {
-        signers,
-        threshold: 1,
-        quorum: 0,
-        spending_limit: 1000,
-        daily_limit: 5000,
-        weekly_limit: 10000,
-        timelock_threshold: 500,
-        timelock_delay: 100,
-        velocity_limit: VelocityConfig {
-            limit: 100,
-            window: 3600,
-        },
-        threshold_strategy: ThresholdStrategy::Fixed,
-        pre_execution_hooks: pre_hooks,
-        post_execution_hooks: post_hooks,
-    };
-    
+    let config = make_hooks_config(&env, signers, pre_hooks, post_hooks);
     client.initialize(&admin, &config);
+    // Vault initialized with hooks — no error
 }
