@@ -17,7 +17,7 @@
 //!
 //! 4. **Bit Packing**: Boolean flags are combined into a single u8 bitfield where possible.
 
-use soroban_sdk::{contracttype, Address, Env, Map, String, Symbol, Vec};
+use soroban_sdk::{contracttype, Address, BytesN, Env, Map, String, Symbol, Vec};
 
 #[path = "types_balance_snapshot.rs"]
 mod types_balance_snapshot;
@@ -76,10 +76,6 @@ pub struct InitConfig {
     pub velocity_limit: VelocityConfig,
     /// Threshold strategy configuration
     pub threshold_strategy: ThresholdStrategy,
-    /// Pre-execution hooks
-    pub pre_execution_hooks: Vec<Address>,
-    /// Post-execution hooks
-    pub post_execution_hooks: Vec<Address>,
     /// Default voting deadline in ledgers (0 = no deadline)
     pub default_voting_deadline: u64,
     /// Addresses allowed to veto proposals.
@@ -90,6 +86,12 @@ pub struct InitConfig {
     pub retry_config: RetryConfig,
     /// Recovery configuration
     pub recovery_config: RecoveryConfig,
+    /// Staking configuration
+    pub staking_config: StakingConfig,
+    /// Pre-execution hook addresses
+    pub pre_execution_hooks: Vec<Address>,
+    /// Post-execution hook addresses
+    pub post_execution_hooks: Vec<Address>,
     pub staking_config: StakingConfig,
     /// Proposal ID namespace prefix for multi-vault coordination (must be multiple of 1_000_000)
     pub proposal_id_prefix: u64,
@@ -146,6 +148,21 @@ pub struct Config {
     pub retry_config: RetryConfig,
     /// Recovery configuration
     pub recovery_config: RecoveryConfig,
+    // pub staking_config: StakingConfig, // Feature incomplete
+
+    // ---- Issue #1081: Multi-Token Vault Support ----
+    /// Supported token addresses (max 10). The first entry is the default token and is never removable.
+    pub supported_tokens: Vec<Address>,
+    /// Per-token daily spending limits keyed by token address index in supported_tokens
+    pub token_daily_limits: Vec<i128>,
+    /// Per-token weekly spending limits
+    pub token_weekly_limits: Vec<i128>,
+
+    // ---- Issue #1064: Streaming Rate Limiter ----
+    /// Maximum cumulative stream outflow allowed within the rolling window (in stroops, 0 = disabled)
+    pub stream_max_window_amount: i128,
+    /// Burst allowance multiplier * 100 (e.g. 150 = 1.5x). Default 150.
+    pub burst_factor: u32,
     pub staking_config: StakingConfig,
     /// Proposal ID namespace prefix for multi-vault coordination
     pub proposal_id_prefix: u64,
@@ -479,6 +496,9 @@ pub struct Proposal {
     pub abstentions: Vec<Address>,
     /// IPFS hashes of supporting documents
     pub attachments: Vec<String>,
+    /// Merkle root of attachment hashes — zero hash if no attachments.
+    /// Computed at proposal creation for tamper-evidence. (Issue #1063)
+    pub attachment_merkle_root: BytesN<32>,
     /// Current status
     pub status: ProposalStatus,
     /// Proposal urgency level

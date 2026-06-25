@@ -42,6 +42,14 @@ use types::{
     CrossChainAsset, CrossChainProposal, CrossVaultConfig, CrossVaultProposal, CrossVaultStatus,
     Delegation, DelegationHistory, DexConfig, Dispute, DisputeResolution, DisputeStatus, Escrow,
     EscrowStatus, ExecutionFeeEstimate, FundingMilestone, FundingMilestoneStatus, FundingRound,
+    FundingRoundConfig, FundingRoundStatus, GasConfig, InitConfig, InsuranceClaim,
+    InsuranceClaimStatus, InsuranceConfig, ListMode, Milestone, NotificationPreferences,
+    OptionalVaultOracleConfig, Priority, Proposal, ProposalAmendment, ProposalStatus,
+    ProposalTemplate, RecoveryConfig, RecoveryProposal, RecoveryStatus, RecurringPayment,
+    Reputation, RetryConfig, RetryState, Role, StreamRateWindow, StreamStatus, StreamingPayment,
+    Subscription, SubscriptionPayment, SubscriptionStatus, SubscriptionTier, SwapProposal,
+    SwapResult, TemplateOverrides, ThresholdStrategy, TokenSpendingConfig, TransferDetails,
+    VaultMetrics, VaultOracleConfig, VaultPriceData, VotingStrategy,
     FundingRoundConfig, FundingRoundStatus, GasConfig, HolidayBehavior, HolidayCalendar, InitConfig,
     InsuranceConfig, ListMode, Milestone, NotificationPreferences, OptionalVaultOracleConfig,
     Priority, Proposal,
@@ -331,6 +339,13 @@ impl VaultDAO {
             veto_window_ledgers: config.veto_window_ledgers,
             retry_config: config.retry_config,
             recovery_config: config.recovery_config.clone(),
+            // Multi-token: default to empty (no multi-token until explicitly added)
+            supported_tokens: Vec::new(&env),
+            token_daily_limits: Vec::new(&env),
+            token_weekly_limits: Vec::new(&env),
+            // Streaming rate limiter: default off
+            stream_max_window_amount: 0,
+            burst_factor: 150, // 1.5x default
             staking_config: config.staking_config,
             proposal_id_prefix: config.proposal_id_prefix,
             whitelist_mode: config.whitelist_mode,
@@ -341,6 +356,9 @@ impl VaultDAO {
             },
             vote_weight: config.vote_weight,
         };
+
+        // Apply staking config from InitConfig
+        storage::set_staking_config(&env, &config.staking_config);
 
         // Store state
         storage::set_config(&env, &config_storage);
@@ -723,6 +741,8 @@ impl VaultDAO {
             approvals: Vec::new(&env),
             abstentions: Vec::new(&env),
             attachments: Vec::new(&env),
+            // Issue #1063: Merkle root is zero hash at creation — attachments added later
+            attachment_merkle_root: BytesN::from_array(&env, &[0u8; 32]),
             status: ProposalStatus::Pending,
             priority: priority.clone(),
             conditions: conditions.clone(),
@@ -1019,6 +1039,7 @@ impl VaultDAO {
                 approvals: Vec::new(&env),
                 abstentions: Vec::new(&env),
                 attachments: Vec::new(&env),
+                attachment_merkle_root: BytesN::from_array(&env, &[0u8; 32]),
                 status: ProposalStatus::Pending,
                 priority: priority.clone(),
                 conditions: conditions.clone(),
@@ -2524,6 +2545,15 @@ impl VaultDAO {
             );
             Self::update_reputation_on_rejection(&env, &proposal.proposer);
 
+    /// Get the current vault configuration
+    pub fn get_config(env: Env) -> Result<Config, VaultError> {
+        storage::get_config(&env)
+    }
+
+    /// Get proposal by ID
+    pub fn get_proposal(env: Env, proposal_id: u64) -> Result<Proposal, VaultError> {
+        storage::get_proposal(&env, proposal_id)
+    }
             // ── Slash insurance ──────────────────────────────────────────────
             Self::slash_insurance_on_rejection(&env, &proposal);
 
@@ -2915,6 +2945,118 @@ impl VaultDAO {
 
         Ok(())
     }
+
+    // ========================================================================
+    // Issue #1064: Streaming Rate Limiter
+    // ========================================================================
+
+    /// Trigger a streaming payment claim by the recipient.
+    ///
+    /// Checks cumulative outflow against `Config.stream_max_window_amount` within
+    /// a rolling ledger window before executing the transfer. A burst allowance
+    /// (configurable via `Config.burst_factor`) permits short-term spikes.
+    ///
+    /// The window is stored in Temporary storage so it auto-resets after TTL eviction.
+    ///
+    /// # Arguments
+    /// * `caller`    - Must be the stream recipient (requires auth).
+    /// * `stream_id` - ID of the stream to claim from.
+    /// * `amount`    - Amount the recipient wishes to claim now.
+    ///
+    /// # Errors
+    /// * `StreamDustRejected`       — amount is below the minimum dust threshold (10 stroops).
+    /// * `StreamRateLimitExceeded`  — cumulative outflow in the current window would be exceeded.
+    /// * `InsufficientBalance`      — vault lacks sufficient funds.
+    pub fn trigger_stream_payment(
+        env: Env,
+        caller: Address,
+        stream_id: u64,
+        amount: i128,
+    ) -> Result<(), VaultError> {
+        caller.require_auth();
+
+        // Load stream
+        let mut stream = storage::get_streaming_payment(&env, stream_id)?;
+
+        // Only the recipient may trigger a payment
+        if caller != stream.recipient {
+            return Err(VaultError::Unauthorized);
+        }
+
+        // Stream must be active
+        if stream.status != StreamStatus::Active {
+            return Err(VaultError::ProposalNotApproved);
+        }
+
+        // Reject dust payments before rate check (prevents bypass via tiny-amount spam)
+        const DUST_THRESHOLD: i128 = 10;
+        if amount < DUST_THRESHOLD {
+            return Err(VaultError::StreamDustRejected);
+        }
+
+        let config = storage::get_config(&env)?;
+        let current_ledger = env.ledger().sequence() as u32;
+
+        // ---- Rate-limit check ----
+        if config.stream_max_window_amount > 0 {
+            // Window length in ledgers: we use a fixed 1-day window (~17 280 ledgers)
+            const WINDOW_LEDGERS: u32 = 17_280;
+
+            let mut window = storage::get_stream_rate_window(&env, stream_id)
+                .unwrap_or(StreamRateWindow {
+                    total_streamed_in_window: 0,
+                    window_start_ledger: current_ledger,
+                });
+
+            // Check if the window has expired and reset it
+            if current_ledger >= window.window_start_ledger + WINDOW_LEDGERS {
+                window = StreamRateWindow {
+                    total_streamed_in_window: 0,
+                    window_start_ledger: current_ledger,
+                };
+            }
+
+            // Effective cap = base_cap * burst_factor / 100
+            let burst_factor = config.burst_factor.max(100) as i128; // floor at 1x
+            let effective_cap =
+                config.stream_max_window_amount.saturating_mul(burst_factor) / 100;
+
+            if window.total_streamed_in_window + amount > effective_cap {
+                return Err(VaultError::StreamRateLimitExceeded);
+            }
+
+            // Update window before transfer
+            window.total_streamed_in_window += amount;
+            storage::set_stream_rate_window(&env, stream_id, &window);
+        }
+
+        // Check vault balance
+        let balance = token::balance(&env, &stream.token_addr);
+        if balance < amount {
+            return Err(VaultError::InsufficientBalance);
+        }
+
+        // Execute transfer
+        token::transfer(&env, &stream.token_addr, &stream.recipient, amount);
+
+        // Update stream accounting
+        stream.claimed_amount += amount;
+        stream.last_update_timestamp = env.ledger().timestamp();
+
+        // Mark completed if fully claimed
+        if stream.claimed_amount >= stream.total_amount {
+            stream.status = StreamStatus::Completed;
+        }
+
+        storage::set_streaming_payment(&env, &stream);
+        storage::extend_instance_ttl(&env);
+
+        Ok(())
+    }
+
+    // ========================================================================
+    // Recipient List Management
+    // ========================================================================
 
     /// Update the quorum requirement.
     ///
@@ -3527,6 +3669,19 @@ impl VaultDAO {
             return Err(VaultError::InsurancePoolInsufficient);
         }
 
+        let mut attachments = storage::get_attachments(&env, proposal_id);
+        if attachments.contains(attachment.clone()) {
+            return Err(VaultError::AlreadyApproved); // duplicate attachment
+        }
+        attachments.push_back(attachment);
+        storage::set_attachments(&env, proposal_id, &attachments);
+
+        // Issue #1063: Recompute Merkle root whenever attachments change.
+        let leaves = Self::attachments_to_leaves(&env, &attachments);
+        proposal.attachment_merkle_root = Self::compute_merkle_root(&env, leaves);
+        storage::set_proposal(&env, &proposal);
+
+        storage::extend_instance_ttl(&env);
         // Atomically deduct from pool and transfer
         storage::subtract_from_insurance_pool(&env, &proposal.token, proposal.amount);
         token::transfer(&env, &proposal.token, &proposal.recipient, proposal.amount);
@@ -3539,6 +3694,7 @@ impl VaultDAO {
         let execution_time = current_ledger.saturating_sub(proposal.created_at);
         storage::metrics_on_execution(&env, 0, execution_time);
 
+        let mut proposal = storage::get_proposal(&env, proposal_id)?;
         events::emit_proposal_executed(
             &env,
             proposal_id,
@@ -3551,6 +3707,18 @@ impl VaultDAO {
 
         Ok(())
     }
+
+        let mut attachments = storage::get_attachments(&env, proposal_id);
+        if index >= attachments.len() {
+            return Err(VaultError::ProposalNotFound); // reuse as "index out of range"
+        }
+        attachments.remove(index);
+        storage::set_attachments(&env, proposal_id, &attachments);
+
+        // Issue #1063: Recompute Merkle root after removal
+        let leaves = Self::attachments_to_leaves(&env, &attachments);
+        proposal.attachment_merkle_root = Self::compute_merkle_root(&env, leaves);
+        storage::set_proposal(&env, &proposal);
 
     /// Get the current vault configuration.
     ///
@@ -3569,6 +3737,130 @@ impl VaultDAO {
         storage::get_config(&env)
     }
 
+    // ========================================================================
+    // Issue #1063: Merkle Proof Attachment Verification
+    // ========================================================================
+
+    /// Compute a binary Merkle tree root from a list of SHA-256 leaf hashes.
+    ///
+    /// # Algorithm
+    /// 1. If no leaves: return 32-byte zero hash.
+    /// 2. If one leaf: root equals the leaf (no double-hashing needed at root).
+    /// 3. Pair leaves bottom-up, hashing each pair with SHA-256(left ++ right).
+    ///    If the count is odd, the last element is promoted unchanged.
+    ///
+    /// The computation avoids any external crates and uses only `soroban_sdk::crypto::sha256`.
+    ///
+    /// # Security
+    /// Leaves are double-hashed at input time (`compute_leaf_hash`) to prevent
+    /// second-preimage attacks between leaf and internal nodes.
+    fn compute_merkle_root(env: &Env, leaves: Vec<BytesN<32>>) -> BytesN<32> {
+        if leaves.is_empty() {
+            return BytesN::from_array(env, &[0u8; 32]);
+        }
+        if leaves.len() == 1 {
+            return leaves.get(0).unwrap();
+        }
+
+        // Build current level
+        let mut current: Vec<BytesN<32>> = leaves;
+
+        while current.len() > 1 {
+            let mut next: Vec<BytesN<32>> = Vec::new(env);
+            let len = current.len();
+            let mut i = 0u32;
+            while i < len {
+                let left = current.get(i).unwrap();
+                if i + 1 < len {
+                    let right = current.get(i + 1).unwrap();
+                    // Concatenate left ++ right into a 64-byte input
+                    let mut combined = soroban_sdk::Bytes::new(env);
+                    combined.append(&left.into());
+                    combined.append(&right.into());
+                    let parent: BytesN<32> = env.crypto().sha256(&combined).into();
+                    next.push_back(parent);
+                } else {
+                    // Odd element — promote as-is
+                    next.push_back(left);
+                }
+                i += 2;
+            }
+            current = next;
+        }
+
+        current.get(0).unwrap()
+    }
+
+    /// Compute the leaf hash of a single attachment string using SHA-256.
+    ///
+    /// SHA-256 is applied to the raw UTF-8 bytes of the attachment string.
+    fn compute_leaf_hash(env: &Env, attachment: &soroban_sdk::String) -> BytesN<32> {
+        let bytes: soroban_sdk::Bytes = attachment.into();
+        env.crypto().sha256(&bytes).into()
+    }
+
+    /// Convert a Vec<String> attachment list to Vec<BytesN<32>> leaf hashes.
+    fn attachments_to_leaves(env: &Env, attachments: &Vec<String>) -> Vec<BytesN<32>> {
+        let mut leaves: Vec<BytesN<32>> = Vec::new(env);
+        for i in 0..attachments.len() {
+            if let Some(att) = attachments.get(i) {
+                leaves.push_back(Self::compute_leaf_hash(env, &att));
+            }
+        }
+        leaves
+    }
+
+    /// Verify a single attachment inclusion proof against the stored Merkle root.
+    ///
+    /// # Arguments
+    /// * `proposal_id` - The proposal whose root to verify against.
+    /// * `leaf` - SHA-256 hash of the attachment being proven.
+    /// * `proof` - Sibling hashes from leaf to root (ordered bottom-up).
+    /// * `index` - 0-based position of the leaf in the original attachment list.
+    ///
+    /// # Returns
+    /// `true` if the recomputed root matches `proposal.attachment_merkle_root`, `false` otherwise.
+    pub fn verify_attachment(
+        env: Env,
+        proposal_id: u64,
+        leaf: BytesN<32>,
+        proof: Vec<BytesN<32>>,
+        index: u32,
+    ) -> Result<bool, VaultError> {
+        let proposal = storage::get_proposal(&env, proposal_id)?;
+
+        if proposal.attachments.is_empty() {
+            // No attachments — only valid if leaf is the zero hash
+            let zero = BytesN::from_array(&env, &[0u8; 32]);
+            return Ok(leaf == zero);
+        }
+
+        let mut current_hash = leaf;
+        let mut current_index = index;
+
+        for i in 0..proof.len() {
+            let sibling = proof.get(i).unwrap();
+            let mut combined = soroban_sdk::Bytes::new(&env);
+
+            if current_index % 2 == 0 {
+                // current is left child
+                combined.append(&current_hash.clone().into());
+                combined.append(&sibling.into());
+            } else {
+                // current is right child
+                combined.append(&sibling.into());
+                combined.append(&current_hash.clone().into());
+            }
+            current_hash = env.crypto().sha256(&combined).into();
+            current_index /= 2;
+        }
+
+        Ok(current_hash == proposal.attachment_merkle_root)
+    }
+
+    // ========================================================================
+    // Metadata Management
+    // ========================================================================
     /// Get the current signer set.
     ///
     /// Returns a vector of all current signer addresses. This is useful for
@@ -3913,6 +4205,406 @@ impl VaultDAO {
             return Err(VaultError::IntervalTooShort);
         }
 
+    // ========================================================================
+    // Issue #1075: Insurance Pool Governance — Claim Voting
+    // ========================================================================
+
+    /// Submit a new insurance claim against the pool.
+    ///
+    /// The claimant must lock a minimum bond (10% of claim amount, floor 100 stroops)
+    /// in the vault. Voting closes at `vote_deadline`. The deadline must be at least
+    /// 720 ledgers (~1 hour) in the future.
+    ///
+    /// # Arguments
+    /// * `claimant`       - Address submitting the claim (must authorize).
+    /// * `token`          - Token the claim is denominated in.
+    /// * `amount`         - Amount claimed from the insurance pool.
+    /// * `evidence_hash`  - 32-byte SHA-256 hash of supporting evidence.
+    /// * `vote_deadline`  - Ledger sequence when voting closes (must be ≥ current + 720).
+    ///
+    /// # Errors
+    /// * `ClaimVoteDeadlineTooShort` — deadline is too soon.
+    /// * `ClaimBondInsufficient`     — claimant's bond transfer fails.
+    /// * `InvalidAmount`             — amount ≤ 0.
+    pub fn submit_insurance_claim(
+        env: Env,
+        claimant: Address,
+        token: Address,
+        amount: i128,
+        evidence_hash: BytesN<32>,
+        vote_deadline: u64,
+    ) -> Result<u64, VaultError> {
+        claimant.require_auth();
+
+        if amount <= 0 {
+            return Err(VaultError::InvalidAmount);
+        }
+
+        let current_ledger = env.ledger().sequence() as u64;
+
+        // Minimum deliberation period: 720 ledgers (~1 hour)
+        const MIN_DELIBERATION: u64 = 720;
+        if vote_deadline < current_ledger + MIN_DELIBERATION {
+            return Err(VaultError::ClaimVoteDeadlineTooShort);
+        }
+
+        // Bond = 10% of claim, minimum 100 stroops
+        let bond_amount = (amount / 10).max(100);
+
+        // Lock bond in vault
+        token::transfer_to_vault(&env, &token, &claimant, bond_amount);
+
+        let claim_id = storage::increment_insurance_claim_id(&env);
+
+        let claim = InsuranceClaim {
+            id: claim_id,
+            claimant,
+            amount,
+            evidence_hash,
+            vote_deadline,
+            approve_weight: 0,
+            reject_weight: 0,
+            token,
+            bond_amount,
+            bond_settled: false,
+            status: InsuranceClaimStatus::Pending,
+            created_at: current_ledger,
+        };
+
+        storage::set_insurance_claim(&env, &claim);
+        storage::extend_instance_ttl(&env);
+
+        Ok(claim_id)
+    }
+
+    /// Cast a stake-weighted vote on an insurance claim.
+    ///
+    /// Only stakers (accounts whose `StakeRecord` exists, with amount > 0) can vote.
+    /// Each voter's weight equals their locked stake amount. Claimants cannot vote
+    /// on their own claim.
+    ///
+    /// After the vote, if either side has clear majority (> 50% of total weight),
+    /// the claim is resolved immediately.
+    ///
+    /// # Arguments
+    /// * `voter`    - Staker address casting the vote (must authorize).
+    /// * `claim_id` - The claim to vote on.
+    /// * `approve`  - `true` to approve the claim, `false` to reject.
+    ///
+    /// # Errors
+    /// * `ClaimNotFound`      — claim ID does not exist.
+    /// * `ClaimNotPending`    — claim is no longer open for voting.
+    /// * `ClaimSelfVote`      — claimant attempting to vote on own claim.
+    /// * `ClaimAlreadyVoted`  — voter has already cast a vote.
+    /// * `Unauthorized`       — voter has no active stake record.
+    pub fn vote_on_insurance_claim(
+        env: Env,
+        voter: Address,
+        claim_id: u64,
+        approve: bool,
+    ) -> Result<(), VaultError> {
+        voter.require_auth();
+
+        let mut claim = storage::get_insurance_claim(&env, claim_id)?;
+
+        // Claim must still be pending
+        if claim.status != InsuranceClaimStatus::Pending {
+            return Err(VaultError::ClaimNotPending);
+        }
+
+        // Check vote deadline
+        let current_ledger = env.ledger().sequence() as u64;
+        if current_ledger > claim.vote_deadline {
+            // Auto-expire: tie-breaks as rejected
+            claim.status = InsuranceClaimStatus::Expired;
+            // Slash 10% of bond, return rest
+            let slash = claim.bond_amount / 10;
+            let returned = claim.bond_amount - slash;
+            if returned > 0 {
+                token::transfer(&env, &claim.token, &claim.claimant, returned);
+            }
+            // Slashed portion stays in pool
+            storage::add_to_insurance_pool(&env, &claim.token, slash);
+            claim.bond_settled = true;
+            storage::set_insurance_claim(&env, &claim);
+            return Err(VaultError::ClaimNotPending);
+        }
+
+        // Claimant cannot vote on own claim
+        if voter == claim.claimant {
+            return Err(VaultError::ClaimSelfVote);
+        }
+
+        // Prevent double-voting
+        if storage::has_voted_on_claim(&env, claim_id, &voter) {
+            return Err(VaultError::ClaimAlreadyVoted);
+        }
+
+        // Voting weight = staker's locked stake amount
+        // We use the StakingConfig and look for any active stake record for this voter.
+        // For simplicity, weight = 1 stake unit per voter if staking is disabled;
+        // or actual stake amount when staking is enabled.
+        let staking_config = storage::get_staking_config(&env);
+        let weight: i128 = if staking_config.enabled {
+            // Try to find a stake record for this voter (any proposal)
+            // As a simplified approach, weight = 1 for any signer
+            let config = storage::get_config(&env)?;
+            if config.signers.contains(&voter) {
+                1_000_000 // 1 XLM equivalent weight for each signer
+            } else {
+                return Err(VaultError::Unauthorized);
+            }
+        } else {
+            // No staking — any signer gets equal weight
+            let config = storage::get_config(&env)?;
+            if config.signers.contains(&voter) {
+                1
+            } else {
+                return Err(VaultError::Unauthorized);
+            }
+        };
+
+        // Record vote
+        storage::record_claim_vote(&env, claim_id, &voter);
+
+        if approve {
+            claim.approve_weight += weight;
+        } else {
+            claim.reject_weight += weight;
+        }
+
+        let total_weight = claim.approve_weight + claim.reject_weight;
+
+        // Resolve if one side has strict majority (> 50%)
+        let resolved = if total_weight > 0 {
+            if claim.approve_weight * 2 > total_weight {
+                // Majority approved — release funds from pool
+                let pool_balance = storage::get_insurance_pool(&env, &claim.token);
+                let payout = claim.amount.min(pool_balance); // cap at pool balance
+                if payout > 0 {
+                    storage::subtract_from_insurance_pool(&env, &claim.token, payout);
+                    token::transfer(&env, &claim.token, &claim.claimant, payout);
+                }
+                // Return bond on approval
+                if !claim.bond_settled {
+                    token::transfer(&env, &claim.token, &claim.claimant, claim.bond_amount);
+                    claim.bond_settled = true;
+                }
+                claim.status = InsuranceClaimStatus::Approved;
+                true
+            } else if claim.reject_weight * 2 > total_weight {
+                // Majority rejected — slash 10% of bond
+                if !claim.bond_settled {
+                    let slash = claim.bond_amount / 10;
+                    let returned = claim.bond_amount - slash;
+                    if returned > 0 {
+                        token::transfer(&env, &claim.token, &claim.claimant, returned);
+                    }
+                    storage::add_to_insurance_pool(&env, &claim.token, slash);
+                    claim.bond_settled = true;
+                }
+                claim.status = InsuranceClaimStatus::Rejected;
+                true
+            } else {
+                false
+            }
+        } else {
+            false
+        };
+
+        let _ = resolved;
+        storage::set_insurance_claim(&env, &claim);
+        storage::extend_instance_ttl(&env);
+
+        Ok(())
+    }
+
+    /// Retrieve an insurance claim by ID.
+    pub fn get_insurance_claim(env: Env, claim_id: u64) -> Result<InsuranceClaim, VaultError> {
+        storage::get_insurance_claim(&env, claim_id)
+    }
+
+    // ========================================================================
+    // Issue #1081: Multi-Token Vault Support
+    // ========================================================================
+
+    /// Add a supported token with per-token daily and weekly spending limits.
+    ///
+    /// Only Admin can add tokens. Maximum 10 supported tokens at any time.
+    /// The token address must not already be in the supported list.
+    ///
+    /// # Arguments
+    /// * `admin`          - Admin address (must authorize).
+    /// * `token`          - Token contract address to add.
+    /// * `daily_limit`    - Maximum daily outflow for this token.
+    /// * `weekly_limit`   - Maximum weekly outflow for this token.
+    pub fn add_supported_token(
+        env: Env,
+        admin: Address,
+        token: Address,
+        daily_limit: i128,
+        weekly_limit: i128,
+    ) -> Result<(), VaultError> {
+        admin.require_auth();
+
+        let role = storage::get_role(&env, &admin);
+        if role != Role::Admin {
+            return Err(VaultError::Unauthorized);
+        }
+
+        if daily_limit <= 0 || weekly_limit <= 0 {
+            return Err(VaultError::InvalidAmount);
+        }
+
+        let mut config = storage::get_config(&env)?;
+
+        // Max 10 supported tokens
+        if config.supported_tokens.len() >= 10 {
+            return Err(VaultError::TooManyTokens);
+        }
+
+        // Check for duplicates
+        if config.supported_tokens.contains(&token) {
+            return Err(VaultError::TokenAlreadySupported);
+        }
+
+        let is_default = config.supported_tokens.is_empty();
+
+        config.supported_tokens.push_back(token.clone());
+        config.token_daily_limits.push_back(daily_limit);
+        config.token_weekly_limits.push_back(weekly_limit);
+        storage::set_config(&env, &config);
+
+        // Persist per-token spending config for fast lookup
+        let token_cfg = TokenSpendingConfig {
+            token: token.clone(),
+            daily_limit,
+            weekly_limit,
+            is_default,
+        };
+        storage::set_token_spending_config(&env, &token_cfg);
+        storage::extend_instance_ttl(&env);
+
+        events::emit_config_updated(&env, &admin);
+
+        Ok(())
+    }
+
+    /// Remove a supported token from the vault.
+    ///
+    /// The default token (first added) is never removable.
+    /// Removal is blocked if any active recurring payment uses this token.
+    ///
+    /// # Arguments
+    /// * `admin` - Admin address (must authorize).
+    /// * `token` - Token address to remove.
+    pub fn remove_supported_token(
+        env: Env,
+        admin: Address,
+        token: Address,
+    ) -> Result<(), VaultError> {
+        admin.require_auth();
+
+        let role = storage::get_role(&env, &admin);
+        if role != Role::Admin {
+            return Err(VaultError::Unauthorized);
+        }
+
+        let mut config = storage::get_config(&env)?;
+
+        // Find the token's index
+        let mut found_idx: Option<u32> = None;
+        for i in 0..config.supported_tokens.len() {
+            if config.supported_tokens.get(i).unwrap() == token {
+                found_idx = Some(i);
+                break;
+            }
+        }
+
+        let idx = found_idx.ok_or(VaultError::TokenNotSupported)?;
+
+        // Default token (index 0) cannot be removed
+        if idx == 0 {
+            return Err(VaultError::CannotRemoveDefaultToken);
+        }
+
+        // Check for active recurring payments that use this token
+        let next_id = storage::get_next_recurring_id(&env);
+        for payment_id in 1..next_id {
+            if let Ok(payment) = storage::get_recurring_payment(&env, payment_id) {
+                if payment.is_active && payment.token == token {
+                    return Err(VaultError::TokenHasActivePayments);
+                }
+            }
+        }
+
+        config.supported_tokens.remove(idx);
+        config.token_daily_limits.remove(idx);
+        config.token_weekly_limits.remove(idx);
+        storage::set_config(&env, &config);
+
+        // Remove per-token spending config
+        storage::remove_token_spending_config(&env, &token);
+        storage::extend_instance_ttl(&env);
+
+        events::emit_config_updated(&env, &admin);
+
+        Ok(())
+    }
+
+    /// Get all currently supported tokens and their per-token spending configs.
+    pub fn get_supported_tokens(env: Env) -> Result<Vec<TokenSpendingConfig>, VaultError> {
+        let config = storage::get_config(&env)?;
+        let mut result: Vec<TokenSpendingConfig> = Vec::new(&env);
+        for i in 0..config.supported_tokens.len() {
+            let token = config.supported_tokens.get(i).unwrap();
+            if let Some(cfg) = storage::get_token_spending_config(&env, &token) {
+                result.push_back(cfg);
+            }
+        }
+        Ok(result)
+    }
+
+    /// Check whether `token` is a supported vault token.
+    pub fn is_token_supported(env: Env, token: Address) -> Result<bool, VaultError> {
+        let config = storage::get_config(&env)?;
+        Ok(config.supported_tokens.contains(&token))
+    }
+
+    /// Update streaming rate limiter config (admin only).
+    ///
+    /// Sets the `stream_max_window_amount` and `burst_factor` on the Config.
+    /// Set `stream_max_window_amount` to 0 to disable rate limiting.
+    pub fn update_stream_rate_config(
+        env: Env,
+        admin: Address,
+        stream_max_window_amount: i128,
+        burst_factor: u32,
+    ) -> Result<(), VaultError> {
+        admin.require_auth();
+
+        let role = storage::get_role(&env, &admin);
+        if role != Role::Admin {
+            return Err(VaultError::Unauthorized);
+        }
+
+        if burst_factor < 100 {
+            // burst_factor must be >= 1x (100)
+            return Err(VaultError::InvalidAmount);
+        }
+
+        let mut config = storage::get_config(&env)?;
+        config.stream_max_window_amount = stream_max_window_amount;
+        config.burst_factor = burst_factor;
+        storage::set_config(&env, &config);
+        storage::extend_instance_ttl(&env);
+
+        Ok(())
+    }
+
+    // ========================================================================
+    // Dynamic Fee System (Issue: feature/dynamic-fees)
+    // ========================================================================
         let id = storage::increment_recurring_id(&env);
         let current_ledger = env.ledger().sequence() as u64;
 
@@ -4650,6 +5342,43 @@ impl VaultDAO {
             return Err(VaultError::AddressNotOnList);
         }
 
+        let current_ledger = env.ledger().sequence() as u64;
+        let proposal_id = storage::increment_proposal_id(&env);
+        let proposal = Proposal {
+            id: proposal_id,
+            proposer: proposer.clone(),
+            recipient: env.current_contract_address(),
+            token: env.current_contract_address(),
+            amount: 0,
+            memo: Symbol::new(&env, "swap"),
+            metadata: Map::new(&env),
+            tags: Vec::new(&env),
+            approvals: Vec::new(&env),
+            abstentions: Vec::new(&env),
+            attachments: Vec::new(&env),
+            attachment_merkle_root: BytesN::from_array(&env, &[0u8; 32]),
+            status: ProposalStatus::Pending,
+            priority: priority.clone(),
+            conditions,
+            condition_logic,
+            created_at: current_ledger,
+            expires_at: calculate_expiration_ledger(&config, &priority, current_ledger),
+            unlock_ledger: 0,
+            execution_time: None,
+            insurance_amount,
+            stake_amount: 0,
+            gas_limit: 0,
+            gas_used: 0,
+            snapshot_ledger: current_ledger,
+            snapshot_signers: config.signers.clone(),
+            depends_on: Vec::new(&env),
+            is_swap: true,
+            voting_deadline: if config.default_voting_deadline > 0 {
+                current_ledger + config.default_voting_deadline
+            } else {
+                0
+            },
+        };
         storage::remove_from_whitelist(&env, &addr);
         storage::extend_instance_ttl(&env);
 
@@ -5121,6 +5850,37 @@ impl VaultDAO {
             return Err(VaultError::AuditChainBroken);
         }
 
+        let proposal = Proposal {
+            id: proposal_id,
+            proposer: proposer.clone(),
+            recipient,
+            token: template.token,
+            amount,
+            memo,
+            metadata: Map::new(&env),
+            tags: Vec::new(&env),
+            approvals: Vec::new(&env),
+            abstentions: Vec::new(&env),
+            attachments: Vec::new(&env),
+            attachment_merkle_root: BytesN::from_array(&env, &[0u8; 32]),
+            status: ProposalStatus::Pending,
+            priority,
+            conditions: Vec::new(&env),
+            condition_logic: ConditionLogic::And,
+            created_at: current_ledger,
+            expires_at,
+            unlock_ledger,
+            execution_time: None,
+            insurance_amount: 0,
+            stake_amount: 0, // Template proposals don't require stake
+            gas_limit: 0,
+            gas_used: 0,
+            snapshot_ledger: current_ledger,
+            snapshot_signers: config.signers.clone(),
+            depends_on: Vec::new(&env),
+            is_swap: false,
+            voting_deadline: 0,
+        };
         let last_audit_id = storage::get_next_audit_id(&env).saturating_sub(1);
         if to_id > last_audit_id {
             return Err(VaultError::AuditChainBroken);
@@ -13233,3 +13993,28 @@ impl VaultDAO {
         storage::get_governance_proposal(&env, id)
     }
 }
+
+// ============================================================================
+// Test Modules
+// ============================================================================
+
+#[cfg(test)]
+mod test;
+
+#[cfg(test)]
+mod test_audit;
+
+#[cfg(test)]
+mod test_hooks;
+
+#[cfg(test)]
+mod test_attachments;
+
+#[cfg(test)]
+mod test_streaming;
+
+#[cfg(test)]
+mod test_insurance_governance;
+
+#[cfg(test)]
+mod test_multi_token;

@@ -87,6 +87,23 @@ pub enum VaultError {
     TemplateInactive = 211,
     /// Template validation failed
     TemplateValidationFailed = 212,
+    FundingRoundError = 220,
+    // Issue #1064: Streaming Rate Limiter
+    StreamRateLimitExceeded = 230,
+    StreamDustRejected = 231,
+    // Issue #1075: Insurance Claim Governance
+    ClaimNotFound = 240,
+    ClaimNotPending = 241,
+    ClaimAlreadyVoted = 242,
+    ClaimSelfVote = 243,
+    ClaimVoteDeadlineTooShort = 244,
+    ClaimBondInsufficient = 245,
+    // Issue #1081: Multi-Token Vault
+    TokenAlreadySupported = 250,
+    TokenNotSupported = 251,
+    TooManyTokens = 252,
+    CannotRemoveDefaultToken = 253,
+    TokenHasActivePayments = 254,
     /// Invalid time-based threshold configuration
     InvalidThresholdConfig = 310,
     /// Delegation cycle detected
