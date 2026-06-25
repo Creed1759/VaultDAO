@@ -4,14 +4,18 @@ version = "0.1.0"
 edition = "2021"
 license = "AGPL-3.0"
 description = "Multi-signature treasury dApp with RBAC on Soroban"
-repository = "https://github.com/otwizzy/VaultDAO"
+repository = "https://github.com/NovaGrids/VaultDAO"
 
 [lib]
-crate-type = ["cdylib"]
+crate-type = ["cdylib", "rlib"]
 doctest = false
 
 [dependencies]
 soroban-sdk = "22.0.8"
+
+[features]
+default = []
+bridge = []
 
 [dev-dependencies]
 soroban-sdk = { version = "22.0.8", features = ["testutils"] }

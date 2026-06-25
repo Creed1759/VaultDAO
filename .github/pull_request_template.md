@@ -1,29 +1,28 @@
-### 📝 Description
+## Summary
 
-Provide a clear description of the changes introduced by this Pull Request.
+What does this PR change, and why?
 
-### 🔗 Related Issues
+## Type of change
 
-Fixes # (issue)
-Closes # (issue)
+- [ ] Bug fix
+- [ ] New feature
+- [ ] Refactor / cleanup
+- [ ] Documentation
+- [ ] Tests
 
-### 🛠️ Type of Changes
+## Related issues
 
-- [ ] Bug fix (non-breaking change which fixes an issue)
-- [ ] New feature (non-breaking change which adds functionality)
-- [ ] Breaking change (fix or feature that would cause existing functionality to not work as expected)
-- [ ] Documentation update
-- [ ] Performance optimization
+Closes #
 
-### ✅ PR Checklist
+## Test plan
 
-- [ ] I have followed the [CONTRIBUTING.md](CONTRIBUTING.md) guidelines.
-- [ ] All new and existing tests passed (`cargo test` for contracts).
-- [ ] I have performed a self-review of my code.
-- [ ] My changes generate no new warnings (clippy/lint).
-- [ ] I have added/updated documentation where necessary.
-- [ ] I have added tests that prove my fix is effective or that my feature works.
+- [ ] `cd contracts/vault && cargo test` (contract changes)
+- [ ] `cd frontend && npm test` (UI changes)
+- [ ] `npm run backend:typecheck && npm run backend:test` (backend changes)
 
-### 📷 Screenshots (if applicable)
+## Checklist
 
-Add screenshots or screen recordings to demonstrate UI changes.
+- [ ] Code follows project conventions (formatting, no panics in contracts)
+- [ ] Tests added or updated where behavior changed
+- [ ] Documentation updated if user-facing behavior changed
+- [ ] No secrets or `.env` files committed

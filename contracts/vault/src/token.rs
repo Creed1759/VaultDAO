@@ -11,6 +11,16 @@ pub fn transfer(env: &Env, token_addr: &Address, to: &Address, amount: i128) {
     client.transfer(&vault_address, to, &amount);
 }
 
+/// Attempt to transfer tokens, returning an error instead of panicking on failure
+pub fn try_transfer(env: &Env, token_addr: &Address, to: &Address, amount: i128) -> Result<(), ()> {
+    let client = token::Client::new(env, token_addr);
+    let vault_address = env.current_contract_address();
+    match client.try_transfer(&vault_address, to, &amount) {
+        Ok(Ok(_)) => Ok(()),
+        _ => Err(()),
+    }
+}
+
 /// Get the vault's balance of a token
 pub fn balance(env: &Env, token_addr: &Address) -> i128 {
     let client = token::Client::new(env, token_addr);
@@ -24,4 +34,17 @@ pub fn transfer_to_vault(env: &Env, token_addr: &Address, from: &Address, amount
     let client = token::Client::new(env, token_addr);
     let vault_address = env.current_contract_address();
     client.transfer(from, &vault_address, &amount);
+}
+
+/// Attempt to transfer tokens from a holder back into the vault (used for rollback).
+/// Returns Result to indicate success/failure without panicking.
+pub fn transfer_from_vault(env: &Env, token_addr: &Address, from: &Address, amount: i128) -> Result<(), ()> {
+    // This will attempt to move `amount` from `from` into the vault.
+    // Caller must ensure proper authorization or that the token contract allows this operation.
+    let client = token::Client::new(env, token_addr);
+    let vault_address = env.current_contract_address();
+    match client.try_transfer(from, &vault_address, &amount) {
+        Ok(Ok(_)) => Ok(()),
+        _ => Err(()),
+    }
 }
